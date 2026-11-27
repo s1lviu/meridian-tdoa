@@ -1,12 +1,20 @@
 {
-  "checked_at": "2026-11-27T07:55:14.309629+00:00",
+  "checked_at": "2026-11-27T10:41:46.402292+00:00",
   "schema_url": "https://render.com/schema/render.yaml.json",
   "schema_sha256": "13248a0ed6e60d3ba2f770a62b2b3075deffcdb141502d7324b3566c9260444f",
-  "config_sha256": "7d7fadcb1751516dd57a971204cb7e9aef6c53a171fc16de882e7724f95cf71c",
+  "config_sha256": "d33d1cb2e9590c2098b91dfc9d9aaf6f1b1b26371ea125e502bc7a871e4e3af0",
   "schema_valid": true,
   "plan": "free",
   "paid_resources_created": false,
   "render_deployed": false,
   "live_rf_validated_on_render": false,
-  "validation_scope": "Local JSON Schema validation against the official published schema. No Render account/API deployment validation."
+  "validation_scope": "Local validation against the official JSON Schema. The custom shutdown delay was removed in response to the reported Render Free rejection. Remote Blueprint revalidation has not been observed.",
+  "reported_plan_rejection": {
+    "reported_on": "2026-11-27",
+    "source": "Render Blueprint creation error supplied by the deployment user",
+    "field": "services[0].maxShutdownDelaySeconds",
+    "message": "max shutdown delay is not supported for free tier services",
+    "rejected_config_sha256": "7d7fadcb1751516dd57a971204cb7e9aef6c53a171fc16de882e7724f95cf71c",
+    "resolution": "Omit the optional maxShutdownDelaySeconds field; retain the free plan."
+  }
 }

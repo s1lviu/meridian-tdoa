@@ -2,7 +2,7 @@
 
 Provider documentation checked on 27 November 2026. This project uses a **Docker Web Service**, containing Rust, Python and KiwiClient. Render provides an `onrender.com` URL and managed HTTPS; no VPS, SSH, custom domain or Caddy is needed for this deployment.
 
-[`render.yaml`](../render.yaml) explicitly selects **Free**, with no paid disk or database. Its structure was checked against Render's published JSON Schema. This does not prove that an instance has been created or that live IQ transport works from Render.
+[`render.yaml`](../render.yaml) explicitly selects **Free**, with no paid disk or database. JSON Schema validation checks the file's structure; Render also checks plan-specific restrictions when creating the Blueprint.
 
 ## Installation
 
@@ -11,9 +11,13 @@ Provider documentation checked on 27 November 2026. This project uses a **Docker
 3. Wait for the build and open the URL Render assigns. `/api/ready` should return `status: ready`. Open `/?replay=1` for the bundled real recording.
 4. Find the generated `MERIDIAN_ADMIN_TOKEN` in the service's Environment settings. Enter it in the application only when requesting capture or reprocessing. Never commit it or place it in a URL.
 
-The configuration uses port 3000 on `0.0.0.0`, `/api/ready`, and up to 190 s for graceful shutdown. Subsequent deploys are manual (`autoDeployTrigger: off`) to avoid interrupting a capture whenever a commit is pushed.
+The configuration uses port 3000 on `0.0.0.0` and `/api/ready`. It omits `maxShutdownDelaySeconds` because Render Free rejects custom shutdown delays; Render's documented default is 30 seconds. A capture still running at shutdown can be interrupted. Subsequent deploys are manual (`autoDeployTrigger: off`) to avoid interrupting a capture whenever a commit is pushed.
 
 When using another repository, keep the Dockerfile and Blueprint at its root. Include `third_party/kiwiclient-4eb733e6.tar.gz`, the local frontend assets and bundled recordings/results. Exclude secrets and build directories.
+
+### Blueprint validation error
+
+If Render reports `max shutdown delay is not supported for free tier services`, select **Retry** after loading the latest `main` branch. The current Blueprint omits that field and keeps `plan: free`. For a fork, pull the correction or remove the `maxShutdownDelaySeconds` entry from its `render.yaml`.
 
 ## Free-plan limitations
 

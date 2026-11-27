@@ -4,7 +4,7 @@ Reviewed on **27 November 2026**. This comparison concerns the existing Rust + P
 
 | Service | Relevant free offer | Fit for Meridian |
 |---|---|---|
-| **Render Free** | Docker, HTTPS and a public URL; 512 MB; idle shutdown after 15 minutes; no persistent disk | Simplest prepared deployment: the repository includes a validated Blueprint. Suitable for testing; newly acquired data is ephemeral. |
+| **Render Free** | Docker, HTTPS and a public URL; 512 MB; idle shutdown after 15 minutes; no persistent disk | Simplest prepared deployment: the repository includes a Free Blueprint. Suitable for testing; newly acquired data is ephemeral. |
 | **Northflank Sandbox** | Public pricing advertises 2 services, 2 jobs, 1 database, up to USD 20/month of included resources and no sleeping | The most promising alternative for an always-running trial. Docker is supported. Confirm account-specific compute, volume and network allowances before deployment. |
 | **Koyeb Free** | One 512 MB / 0.1 vCPU instance; sleeps after one idle hour; no volumes | Longer idle period than Render, but does not solve persistent IQ storage. |
 | **Hugging Face Docker Spaces** | CPU Basic hardware has no hourly charge, but creating Docker Spaces currently requires a paid subscription | Not a strictly free alternative. Outbound ports are limited to 80, 443 and 8080, which excludes the configured Kiwi endpoints on 8073. |
