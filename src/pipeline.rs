@@ -124,7 +124,7 @@ pub fn process(manifest_path: &Path, fault_receiver: Option<&str>) -> Result<Emi
             fs::metadata(&p)?.len() <= 64 * 1024 * 1024,
             "IQ file too large"
         );
-        ensure!(checksum(&p)? == r.sha256, "SHA256 nu corespunde: {}", r.id);
+        ensure!(checksum(&p)? == r.sha256, "SHA-256 mismatch: {}", r.id);
         let mut t = kiwi::read(&p)?;
         if Some(r.id.as_str()) == fault_receiver {
             t.max_age = 255;
@@ -155,7 +155,7 @@ pub fn process(manifest_path: &Path, fault_receiver: Option<&str>) -> Result<Emi
         (week.timestamp() as f64 + start - m.gps_utc_offset_s as f64 - date.timestamp() as f64)
             .abs()
             < 180.,
-        "Semaine GPS incompatible cu ancora UTC"
+        "GPS week is inconsistent with the UTC capture anchor"
     );
     let overlap = end - start;
     let mut e = Emission {
@@ -187,6 +187,7 @@ pub fn process(manifest_path: &Path, fault_receiver: Option<&str>) -> Result<Emi
         spectrum: vec![],
         processed_at: Utc::now().to_rfc3339(),
         reference: None,
+        excluded: m.rejected_receivers.clone(),
     };
     let fs = 12000.;
     let n = (overlap.max(0.).min(120.) * fs) as usize;

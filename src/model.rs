@@ -24,6 +24,14 @@ pub struct Receiver {
     pub sha256: String,
 }
 
+/// A captured receiver withheld from localization, with the RF reason recorded for provenance.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RejectedReceiver {
+    #[serde(flatten)]
+    pub receiver: Receiver,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Identity {
     pub callsign: String,
@@ -48,6 +56,9 @@ pub struct Manifest {
     pub emission_verified: bool,
     pub identity: Option<Identity>,
     pub receivers: Vec<Receiver>,
+    /// Receivers whose IQ failed the RF verifier; kept for provenance, never localized.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rejected_receivers: Vec<RejectedReceiver>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -129,6 +140,9 @@ pub struct Emission {
     pub processed_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference: Option<VerifiedReference>,
+    /// Receivers captured but excluded by the RF verifier before correlation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded: Vec<RejectedReceiver>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

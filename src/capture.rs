@@ -507,7 +507,7 @@ pub async fn record(capture: Capture) -> Result<PathBuf> {
                     tokio::time::timeout(Duration::from_secs(target.duration_s + 20), cmd.status())
                         .await
                         .context("Timeout IQ")??;
-                ensure!(status.success(), "KiwiClient terminat cu eroare");
+                ensure!(status.success(), "KiwiClient exited with an error");
                 Ok(())
             }
             .await;
@@ -561,6 +561,7 @@ pub async fn record(capture: Capture) -> Result<PathBuf> {
         emission_verified: false,
         identity: None,
         receivers,
+        rejected_receivers: vec![],
     };
     // Eligibility of a monitored channel never establishes the callsign of a particular emission.
     let path = dir.join("manifest.json");

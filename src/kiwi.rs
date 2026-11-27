@@ -134,7 +134,7 @@ pub fn parse(bytes: &[u8]) -> Result<Track> {
         sync_error = Some("GNSS discontinuity, missing block or unstable clock".into());
     }
     if actual_fs <= 0. || blocks.windows(2).any(|w| w[1].t <= w[0].t) {
-        bail!("Marcaje GNSS nemonotone");
+        bail!("Non-monotonic GNSS timestamps");
     }
     Ok(Track {
         blocks,

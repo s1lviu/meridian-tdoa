@@ -79,7 +79,7 @@ pub fn verify(manifest_path: &Path) -> Result<Vec<Match>> {
     pipeline::validate_manifest(&m)?;
     ensure!(
         m.kind == "public_time_reference" && (m.frequency_hz - 77500.).abs() < 0.1,
-        "Profilul DCF77 este limitat la etalonul public de 77,5 kHz"
+        "The DCF77 profile is limited to the public 77.5 kHz time reference"
     );
     let root = manifest_path.parent().unwrap().canonicalize()?;
     let mut proof = vec![];
@@ -107,13 +107,33 @@ pub fn verify(manifest_path: &Path) -> Result<Vec<Match>> {
         &root.join("verification.json"),
         &serde_json::json!({"profile":PROFILE,"reference":SOURCE,"threshold":0.65,"minimum_windows":4,"required_fraction":0.8,"receivers":proof,"uses_transmitter_coordinates":false}),
     )?;
-    if proof.len() >= 3 && proof.iter().all(|p| p.accepted) {
+    let passed = |r: &Receiver| {
+        proof
+            .iter()
+            .any(|p| p.accepted && p.receiver_id == r.id && p.sha256 == r.sha256)
+    };
+    if proof.iter().filter(|p| p.accepted).count() >= 3 {
+        // A receiver whose IQ does not carry the phase code is withheld; the others still measure.
+        let (kept, failed): (Vec<_>, Vec<_>) = m.receivers.drain(..).partition(|r| passed(r));
+        m.receivers = kept;
+        for r in failed {
+            let p = proof.iter().find(|p| p.receiver_id == r.id);
+            m.rejected_receivers.push(RejectedReceiver {
+                reason: format!(
+                    "DCF77 phase code not verified in this IQ ({} of {} windows ≥0.65)",
+                    p.map_or(0, |p| p.accepted_windows),
+                    p.map_or(0, |p| p.tested_windows)
+                ),
+                receiver: r,
+            });
+        }
         m.emission_verified = true;
         m.provenance = Evidence {
             url: SOURCE.into(),
             note: format!(
-                "DCF77 PRN modulation matched the PTB code in at least four 2 s windows and ≥80% of windows on {} independent receivers (normalized threshold 0.65). Per-SHA256 evidence is in verification.json. This public time reference is used for commissioning. Transmitter coordinates are not used.",
-                proof.iter().filter(|p| p.accepted).count()
+                "DCF77 PRN modulation matched the PTB code in at least four 2 s windows and ≥80% of windows on {} independent receivers (normalized threshold 0.65); {} receiver(s) failed and are excluded. Per-SHA256 evidence is in verification.json. Transmitter coordinates are not used.",
+                m.receivers.len(),
+                m.rejected_receivers.len()
             ),
         };
         // The modulation establishes the public time-signal profile. Callsign assignment remains conservative.
@@ -140,8 +160,7 @@ pub fn reference_view(e: &Emission, capture_dir: &Path) -> Option<VerifiedRefere
     let proof: Proof =
         serde_json::from_slice(&std::fs::read(capture_dir.join("verification.json")).ok()?).ok()?;
     if proof.profile != PROFILE
-        || proof.receivers.len() < 3
-        || proof.receivers.len() != e.receivers.len()
+        || e.receivers.len() < 3
         || !e.receivers.iter().all(|rx| {
             proof.receivers.iter().any(|p| {
                 p.accepted && p.receiver_id == rx.receiver.id && p.sha256 == rx.receiver.sha256

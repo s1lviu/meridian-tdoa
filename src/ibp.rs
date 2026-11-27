@@ -262,6 +262,7 @@ pub fn analyze(path: &Path) -> Result<Analysis> {
                     spectrum,
                     processed_at: Utc::now().to_rfc3339(),
                     reference: None,
+                    excluded: vec![],
                 };
                 if heard > 0 {
                     pipeline::locate_receptions(&mut e);
