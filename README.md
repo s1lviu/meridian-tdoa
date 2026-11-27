@@ -1,33 +1,40 @@
 # Meridian TDoA Observatory
 
-A Rust web application for locating eligible public beacon and participating amateur-radio emissions using **time difference of arrival only**, with an interactive map and an auditable IQ processing pipeline.
+**Put radio signals on the map.**
+
+Meridian is an open-source web app for exploring where radio signals come from. It compares when the **same transmission** reaches several synchronized software-defined radio (SDR) receivers, then displays possible source locations on an interactive map.
+
+Built for **public radio beacons** and **participating amateur-radio stations**, using **Time Difference of Arrival (TDoA)**.
 
 [![Verify Meridian](https://github.com/s1lviu/meridian-tdoa/actions/workflows/ci.yml/badge.svg)](https://github.com/s1lviu/meridian-tdoa/actions/workflows/ci.yml)
-[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/s1lviu/meridian-tdoa)
 
-**Status: experimental; live RF acceptance is still pending.** Real historical multireceiver IQ has been processed and tested in Chromium, including injected GNSS loss. Live source policies and metadata have been checked, but the attempted WebSocket IQ captures failed in the development environment. There is no claimed live reception, continuous global monitoring, or guaranteed localization accuracy. Publishing this repository does not deploy a running service.
+[Quick start](#quick-start) · [Deploy](#deploy) · [Documentation](#documentation) · [Contribute](CONTRIBUTING.md)
 
-![Meridian displaying the real DCF77 recording and its unresolved location ambiguity](evidence/desktop.png)
+![Meridian showing a radio recording, candidate source regions and the receiving stations on an interactive map](evidence/desktop.png)
 
-## What it does
+*The included DCF77 recording, replayed with receiver details and possible source regions.*
 
-- Filters estimated regions by viewport intersection when the map moves or zooms, with band and UTC filters.
-- Keeps every confirmed receiving station in the selected emission's details, including receivers outside the viewport. Receivers actually used by the solver are distinguished visually.
-- Requires at least three independent, non-collinear receivers observing the same RF emission simultaneously on a common timebase.
-- Rejects inadequate synchronization, correlation or geometry with **“Position undetermined”**. Separates **“Unmonitored interval”** from **“No emission detected”**.
-- Uses verifiable emission-specific identity evidence; otherwise shows **“unknown callsign”**. Frequency and estimated position never establish identity.
-- Separates live capture, archived replay and injected-fault tests. Captures are requested by an administrator; map refreshes do not open SDR connections.
-- Discovers the public KiwiSDR directory, checks the published API policy and receiver status, records independent IQ streams with the official KiwiClient, and runs DSP and localization in Rust.
+## What you can do
 
-## Real-data validation
+- **Explore the map.** Pan and zoom to find transmissions whose estimated regions overlap your view.
+- **Find a specific observation.** Filter by frequency band and UTC time range.
+- **Inspect the evidence.** Select a transmission to see its frequency, capture time and every confirmed receiver, including those outside the map view.
+- **Understand the result.** See uncertainty regions and which receivers contributed to the calculation. Callsigns appear only when supported by evidence for that transmission.
+- **Replay and compare.** Revisit saved recordings, run a synchronization-loss check, or request a new capture as an administrator. Live and replay data are labeled separately.
 
-The bundled dataset is the **DCF77 public time reference, recorded on 13 August 2020** by three receivers. It is a commissioning dataset, not an amateur-radio beacon recording. Original WAV files and SHA-256 hashes are preserved.
+## How it works
 
-A global search produces **two compatible hypotheses**. Post-hoc distances from the independently published PTB reference are **1.7883 km** and **19,798.1022 km**. The application does not select the closer hypothesis: its result remains **Position undetermined**. The reference coordinates are used only by the evaluator, never by the solver, receiver selection or search domain.
+1. **Receive** — Independent KiwiSDR receivers record the same signal at the same time, using a shared time reference.
+2. **Compare** — The Rust backend measures the small differences in arrival time between receivers.
+3. **Map** — Those differences constrain the transmitter's possible location. Meridian plots the resulting regions and receiving stations.
 
-Invalidating one receiver's GNSS state leaves two synchronized receivers and produces no position or candidate region. See the [validation report](docs/VALIDATION.md) and [live-source evidence](docs/LIVE-SOURCES.md).
+An estimate needs at least **three synchronized receivers** with suitable geometry. When timing, signal agreement or geometry cannot support a location, the app shows **Position undetermined**. Ambiguous results show multiple possible regions.
 
-## Quick start with Docker
+Meridian uses KiwiSDR receivers that support synchronized signal recordings and allow automated access. [Read about receiver checks →](docs/LIVE-SOURCES.md)
+
+## Quick start
+
+With **Docker** installed, run:
 
 ```sh
 git clone https://github.com/s1lviu/meridian-tdoa.git
@@ -38,75 +45,32 @@ docker run --rm --init -p 3000:3000 \
   -v meridian-data:/app/data meridian-tdoa:0.2.0
 ```
 
-Open **http://localhost:3000/?replay=1**. This command uses the replay configuration. It needs no external map tiles, API keys or font services. The official KiwiClient archive and real recording are included in the source tree; dependency packages are downloaded during the build.
+Open **[localhost:3000](http://localhost:3000/?replay=1)**.
 
-For live operation, use `config/production.json` and a protected administrator token. Follow [production setup](docs/PRODUCTION.md) before enabling acquisition. Historical availability is not evidence of current receiver access or synchronization.
+This setup opens a replay of a **real DCF77 recording from three receivers**. Explore the map, inspect the recording, or select **Test GNSS loss** to see how losing synchronization changes the result. No SDR account or map API key is needed for the included replay.
 
-## Deploy from GitHub
+Prefer a native build? See the [development guide](docs/DEVELOPMENT.md).
 
-The Render button uses [`render.yaml`](render.yaml), which explicitly selects **Free** and creates no paid database or disk. Render handles the public URL and HTTPS. The generated `MERIDIAN_ADMIN_TOKEN` is available in the service's environment settings; never put it in a URL or commit it.
+## Deploy
 
-**Render Free loses new captures and job history on restart or idle shutdown.** It is suitable for testing the interface and attempting bounded live captures, not for a durable production archive. See [Render setup](docs/RENDER.md).
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/s1lviu/meridian-tdoa)
 
-[Hosting alternatives](docs/HOSTING.md) compares Northflank Sandbox, Koyeb and other options using current provider documentation. No hosting provider has yet been validated for this application's live RF workload.
+The repository includes a Dockerfile and a **Render Free** Blueprint. Render provides the public URL and HTTPS; the [setup guide](docs/RENDER.md) walks through deployment and administrator access.
 
-## Run natively
+Render Free uses temporary storage. To keep new captures across restarts, follow the [persistent storage instructions](docs/RENDER.md#persistent-storage). For other providers, see the [hosting comparison](docs/HOSTING.md).
 
-Requirements: the tested Rust toolchain is **1.100.0**, a C toolchain for dependencies, and Python 3 for evaluation. Node is required only for frontend dependency maintenance and browser tests.
+## Documentation
 
-```sh
-cargo build --locked
-./scripts/start.sh
-```
-
-`MERIDIAN_CONFIG` selects a configuration file; `PORT` overrides its listening port and binds `0.0.0.0`. The default `config/app.json` disables live capture. To install the native capture client:
-
-```sh
-./scripts/setup_kiwiclient.sh
-MERIDIAN_CONFIG=config/live-verified.json \
-  MERIDIAN_ADMIN_TOKEN_FILE=/path/to/protected/token ./scripts/start.sh
-```
-
-The token must contain at least 24 characters. The API does not expose it and the browser does not persist it. The Docker configuration uses `python3`; the native live configuration uses `.venv/bin/python`.
-
-## Reproduce the checks
-
-```sh
-cargo fmt -- --check
-cargo test --locked
-./scripts/validate_data.sh
-python3 tests/transport.py
-npm ci
-npx playwright install --with-deps chromium
-# Start the server in another terminal, then:
-CHROMIUM_PATH="$(node --input-type=module -e 'import {chromium} from "playwright"; process.stdout.write(chromium.executablePath())')" npm run test:browser
-```
-
-Set `BASE_URL` if the test server is not at `http://127.0.0.1:3000`. `tests/release.mjs` additionally exercises authenticated reprocessing against a running server and requires `MERIDIAN_ADMIN_TOKEN` or `.secrets/runtime.env`. Tests never contact public SDRs to obtain synthetic successes. The four-receiver geometry test is explicitly synthetic; it is not evidence of live accuracy.
-
-## Configuration and data
-
-Only verified **approximately 12 kHz Kiwi IQ WAV** is supported. Ordinary audio streams and unverified WebSDR/OpenWebRX protocols are not used for TDoA. Captures use 3–8 receivers, 10–120 seconds and at most 64 MiB of IQ per processed set, subject to stricter source limits. Published `ext_api` and `tdoa_ch` policies, band availability, antenna metadata and preflight GNSS are rechecked before acquisition. Synchronization is then checked in the actual IQ blocks.
-
-The DCF77 profile verifies the PTB PRN modulation before automatic processing. Other targets require capture-specific eligibility evidence through the review API. The 1 km antenna-position allowance is a declared assumption, not a surveyed accuracy. Timing and uncertainty limitations are documented in [VALIDATION.md](docs/VALIDATION.md).
-
-Import another real recording under `data/datasets/<name>/manifest.json`, using the bundled manifest as the schema example. Keep paths within the dataset directory, preserve original IQ hashes and use `mode: "replay"`. Set `emission_verified: true` only after checking provenance; `identity` may remain `null`.
-
-```sh
-cargo run --locked -- process data/datasets/name/manifest.json
-# Restart the server to discover an imported dataset and result.
-```
-
-## Project layout
-
-| Path | Responsibility |
+| I want to… | Read |
 |---|---|
-| `src/kiwi.rs`, `src/dsp.rs` | Kiwi WAV parsing, GNSS validation, detection and correlation |
-| `src/geo.rs`, `src/pipeline.rs` | TDoA search, geometry, ambiguity and uncertainty regions |
-| `src/capture.rs`, `src/protocol.rs` | Independent capture and RF eligibility verification |
-| `src/directory.rs`, `src/store.rs` | Public source metadata and durable single-writer state |
-| `src/main.rs`, `web/` | Axum API and responsive Leaflet interface |
-| `data/recordings/`, `evidence/` | Original real IQ, provenance and timestamped test evidence |
-| `docs/API.md`, `docs/PRODUCTION.md` | API contract and operational setup |
+| Configure receivers, capture and storage | [Deployment and operation](docs/PRODUCTION.md) |
+| Integrate with the backend | [API reference](docs/API.md) |
+| Build, test or import another recording | [Development guide](docs/DEVELOPMENT.md) |
+| Understand the measurements and their limits | [Method and validation](docs/VALIDATION.md) |
+| Check receiver access and source provenance | [Live sources](docs/LIVE-SOURCES.md) |
 
-Contributions: [CONTRIBUTING.md](CONTRIBUTING.md). License: **GPL-3.0-or-later** for this project; bundled upstream assets retain their own licenses and attribution in [THIRD_PARTY.md](THIRD_PARTY.md).
+## Contributing and license
+
+Built with **Rust · Axum · Leaflet · KiwiClient**. See [CONTRIBUTING.md](CONTRIBUTING.md) for development guidelines.
+
+Licensed under **[GPL-3.0-or-later](LICENSE)**. Bundled recordings, libraries and map data retain their original licenses; see [third-party notices](THIRD_PARTY.md).
