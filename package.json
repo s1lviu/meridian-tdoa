@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "vendor": "node scripts/vendor.mjs",
-    "test:browser": "node tests/browser.mjs"
+    "test:browser": "node tests/browser.mjs",
+    "test:browser:live": "node tests/live-observatory.mjs"
   },
   "dependencies": {
     "leaflet": "1.9.4",

@@ -21,7 +21,7 @@ If Render reports `max shutdown delay is not supported for free tier services`, 
 
 ## Free-plan limitations
 
-Free can serve the map, API and included real recording. The delivered configuration also allows administrator-initiated live capture attempts; actual RF reception and synchronization still need verification from the host.
+The production profile rotates between the five International Beacon Project frequencies and DCF77 while the server is awake. On this hosting plan the monitor pauses during service sleep. Successful live RF acquisition must be verified on the chosen host.
 
 The service sleeps after 15 minutes without inbound traffic. New IQ, results and job history are lost on restart, redeploy or sleep; bundled historical files are restored from the image. Free has no persistent disks and may be suspended for excessive service-initiated internet traffic. Its 512 MB RAM has not been validated for the full allowed workload. Artificial keep-alive traffic is not used.
 

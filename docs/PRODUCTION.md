@@ -1,6 +1,6 @@
 # Deployment and operation
 
-For the simplest Git-based installation, use [Render](RENDER.md). [Hosting alternatives](HOSTING.md) evaluates other services. The source repository and local checks are available; a public application deployment and successful live RF acquisition have not yet been demonstrated.
+The native instance acquired and localized the live DCF77 time signal on four receivers on 27 November 2026. Each hosting instance needs its own transport and storage checks. [Render setup](RENDER.md) and [hosting alternatives](HOSTING.md) describe deployment.
 
 ## Docker on a server
 
@@ -22,20 +22,41 @@ Validate resource enforcement on the actual host. In the managed development Doc
 
 ## Live configuration
 
-`config/production.json` contains five real receiver candidates checked on 26 November 2026 and a DCF77 commissioning target. These observations do not guarantee future availability. The UI can select another 3–8 directory receivers for a configured eligible target.
+`config/production.json` includes a DCF77 commissioning target and the five NCDXF/IARU beacon frequencies. Its fixed receiver list serves DCF77 and manual captures. The HF monitor selects from the worldwide directory at each attempt.
 
 - `permission.basis: published_api`: recheck positive `ext_api` and `tdoa_ch` directly on every capture, together with band, availability, GNSS and antenna metadata. A published allowance is not a reserved channel. Zero or missing permission is not accepted.
 - Other permission bases require documented authorization and a future `expires_utc`; expired authorizations fail closed. `expires_utc` is not used as an invented operator promise for `published_api`.
 - Positions are operator-reported, associated with antenna metadata and compared against `/status`. The 1 km allowance is a conservative assumption, not an independent phase-centre survey. Antenna/cable delays are not calibrated.
 - `gps_offset_valid_until_utc` requires a fresh GPS–UTC offset review. The bundled 18 s offset follows IERS Bulletin C72, with a conservative revalidation deadline of **1 January 2027**; do not extend it without checking the current bulletin.
 - `verification: dcf77_prn_v1` matches the PTB PRN code on every saved receiver: at least four 2 s windows, normalized correlation ≥0.65 in ≥80% of windows, at least three receivers. Frequency alone never verifies an emission. Automatic live identity remains unknown.
-- Other public beacons or participating amateur stations require documented eligibility and manual capture-specific RF review. There is no universal emission classifier.
+- `verification: ncdxf_cw_v1` processes ten-second GNSS-aligned transmissions independently. Each receiver must match the complete scheduled Morse callsign and first power dash. A single verified receiver can establish reception. Position requires independent receivers, accepted differential delays and a bounded solution. [Controller timing](https://www.ncdxf.org/beacon/beaconcontroller.html)
+- Other documented public beacons or participating amateur stations use manual capture-specific RF review.
 
-Capture is on demand: one job, at most 8 receivers, no automatic retries, at least 60 s between attempts. Source-specific duration limits apply. Directory refresh is cached for at least 30 minutes and does not occupy SDR channels. The UI's live refresh fetches existing results; it does not start captures or imply continuous global monitoring.
+### Scheduled public observatory
+
+The production profile runs one worker for all visitors. The same settings work in a native live configuration.
+
+```json
+"monitor": {
+  "target_id": "dcf77-validation",
+  "additional_target_ids": ["ibp-20m", "ibp-17m", "ibp-15m", "ibp-12m", "ibp-10m"],
+  "interval_s": 73,
+  "directory_receivers": 8,
+  "parallel_bands": 2
+}
+```
+
+Every 73 seconds the worker schedules two of the six targets for simultaneous 30-second IQ captures. The rotation advances by the number of scheduled targets, covering all six in three windows. Each target gets its own job, manifest, UTC overlap and receiver set. Fixed LF receivers take precedence when LF is scheduled. The HF pool rotates through eligible locations, and each receiver has one assignment per window. The group limit of eight bounds the solver's exhaustive subset search. The worker reserves the combined archive allowance and cooldown before opening receivers. `parallel_bands` defaults to one in older configurations and may be set up to the number of configured monitor targets.
+
+The production profile also sets `digital_reports` to true. One independent server connection receives FT8 and WSPR reports over TLS from `mqtt.pskreporter.info:1884` with exponential reconnect delays. The server retains counters for the current UTC minute and the preceding 14 minutes in memory. Reports expire during outages and collection resumes on reconnect. Digital reports run independently of the IQ archive quota and scheduler. [Feed and attribution](https://www.mqtt.pskreporter.info/)
+
+The world view distinguishes the current schedule, measured receptions and TDoA fixes. Visitors can open any of the 18 beacon entries and inspect its verified bands in the chosen interval. The page reads shared results every eight seconds. No receiver connections are opened by a visitor browsing the map.
+
+Omit `additional_target_ids` for a single target. Set `directory_receivers` to zero to use configured receiver IDs. Omit `monitor` for administrator-triggered captures only. Supported intervals range from 60 to 86,400 seconds. Scheduled and manual captures share one worker and the on-disk cooldown. Missed windows are skipped. A full archive, persistence failure or expired GPS–UTC validation pauses scheduling. Each receiver's permission is checked at acquisition time. Directory refresh is cached for at least 30 minutes.
 
 ## Required acceptance on the chosen host
 
-Live IQ transport failed in the development environment: direct connections were refused, an HTTP CONNECT tunnel closed during handshake, and a proxy WebSocket Upgrade returned HTTP 403. `/status` worked. The exact failing layer was not conclusively identified. Do not infer RF reception from successful metadata requests.
+The earlier container run could retrieve `/status` but failed to acquire IQ. The native run subsequently captured synchronized IQ. Test from the actual deployment host because a successful metadata response establishes only reachability of that endpoint.
 
 Before declaring the deployment operational for live measurements:
 

@@ -1,8 +1,9 @@
 /target/
-/node_modules/
+/node_modules
 /.venv/
 /vendor/
 /data/captures/
+/data/results/live-*.json
 /data/datasets/
 .env
 *.tmp

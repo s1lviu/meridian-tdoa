@@ -173,7 +173,10 @@ pub fn locate(rx: &[RxResult], pairs: &[Pair]) -> Result<Vec<Estimate>> {
             .sum::<f64>()
             / obs.len() as f64)
             .sqrt();
-        solutions.push(Estimate{center,polygon,radius_km:radius,residual_us,geometry_score:g,uncertainty_note:"Δχ²=5.991 contour conditional on propagation at c over a sphere and timing errors. Minimum floor: one sample. Systematic ionospheric/antenna errors are not included; statistical coverage is not calibrated.".into()});
+        solutions.push(Estimate {
+            center, polygon, radius_km: radius, residual_us, geometry_score: g,
+            uncertainty_note: "Δχ²=5.991 contour using the reported pair timing uncertainties and spherical propagation at c. Ionospheric paths and antenna delays can shift the estimate. Statistical coverage is uncalibrated.".into(),
+        });
     }
     Ok(solutions)
 }

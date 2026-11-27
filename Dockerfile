@@ -3,6 +3,7 @@ FROM rust:1.100.0-slim-bookworm@sha256:bb875b0f8ce726053e259034848c471840e96bfe5
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY web/dcf77-reference.json web/ibp-evaluation.json ./web/
 RUN --mount=type=secret,id=proxy_ca \
     --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \

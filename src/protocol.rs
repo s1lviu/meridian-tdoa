@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 pub const SOURCE: &str = "https://www.ptb.de/cms/fileadmin/internet/fachabteilungen/abteilung_4/4.4_zeit_und_frequenz/4.42/dcf77.pdf";
+pub const PROFILE: &str = "dcf77_prn_v1";
 const FS: usize = 12000;
 
 fn template() -> Vec<Complex<f64>> {
@@ -104,7 +105,7 @@ pub fn verify(manifest_path: &Path) -> Result<Vec<Match>> {
     }
     store::atomic_json(
         &root.join("verification.json"),
-        &serde_json::json!({"profile":"dcf77_prn_v1","reference":SOURCE,"threshold":0.65,"minimum_windows":4,"required_fraction":0.8,"receivers":proof,"uses_transmitter_coordinates":false}),
+        &serde_json::json!({"profile":PROFILE,"reference":SOURCE,"threshold":0.65,"minimum_windows":4,"required_fraction":0.8,"receivers":proof,"uses_transmitter_coordinates":false}),
     )?;
     if proof.len() >= 3 && proof.iter().all(|p| p.accepted) {
         m.emission_verified = true;
@@ -122,9 +123,108 @@ pub fn verify(manifest_path: &Path) -> Result<Vec<Match>> {
     Ok(proof)
 }
 
+/// Link observations across time only when every IQ hash has matching phase-code evidence.
+pub fn reference_view(e: &Emission, capture_dir: &Path) -> Option<VerifiedReference> {
+    if e.mode != "live"
+        || e.fault_injected
+        || e.frequency_hz != 77_500.0
+        || e.provenance.url != SOURCE
+    {
+        return None;
+    }
+    #[derive(Deserialize)]
+    struct Proof {
+        profile: String,
+        receivers: Vec<Match>,
+    }
+    let proof: Proof =
+        serde_json::from_slice(&std::fs::read(capture_dir.join("verification.json")).ok()?).ok()?;
+    if proof.profile != PROFILE
+        || proof.receivers.len() < 3
+        || proof.receivers.len() != e.receivers.len()
+        || !e.receivers.iter().all(|rx| {
+            proof.receivers.iter().any(|p| {
+                p.accepted && p.receiver_id == rx.receiver.id && p.sha256 == rx.receiver.sha256
+            })
+        })
+    {
+        return None;
+    }
+    Some(VerifiedReference {
+        profile: proof.profile,
+        three_receivers: comparison(e),
+        cw: vec![],
+    })
+}
+
+pub fn comparison(e: &Emission) -> Option<ReceiverComparison> {
+    let mut used: Vec<_> = e.receivers.iter().filter(|r| r.used).collect();
+    used.sort_by_key(|r| &r.receiver.id);
+    (used.len() > 3).then(|| {
+        // Choose by receiver geometry alone, before looking at any delays or solutions.
+        let mut best = [used[0], used[1], used[2]];
+        let mut best_score = -1.0;
+        for (i, &a) in used.iter().enumerate() {
+            for (j, &b) in used.iter().enumerate().skip(i + 1) {
+                for &c in &used[j + 1..] {
+                    let triangle = [a, b, c];
+                    let score = crate::geo::geometry(&triangle.map(|r| r.receiver.position));
+                    if score > best_score {
+                        best_score = score;
+                        best = triangle;
+                    }
+                }
+            }
+        }
+        let three = best.map(Clone::clone);
+        let (solutions, reason) = match crate::geo::locate(&three, &e.pairs) {
+            Ok(solutions) => (solutions, None),
+            Err(err) => (vec![], Some(err.to_string())),
+        };
+        ReceiverComparison {
+            receiver_ids: three.iter().map(|r| r.receiver.id.clone()).collect(),
+            selection: "max_geometry".into(),
+            solutions,
+            reason,
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn grouping_requires_live_phase_evidence_for_every_iq_file() {
+        let mut e: Emission =
+            serde_json::from_str(include_str!("../data/results/dcf77-20200813.json")).unwrap();
+        let d = tempfile::tempdir().unwrap();
+        let receivers: Vec<_> = e
+            .receivers
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "receiver_id":r.receiver.id, "sha256":r.receiver.sha256, "tested_windows":5,
+                    "accepted_windows":5, "correlations":[0.9,0.9,0.9,0.9,0.9], "accepted":true
+                })
+            })
+            .collect();
+        let mut proof = serde_json::json!({"profile":PROFILE, "receivers":receivers});
+        let path = d.path().join("verification.json");
+        store::atomic_json(&path, &proof).unwrap();
+        e.provenance.url = SOURCE.into();
+        assert!(reference_view(&e, d.path()).is_none());
+        e.mode = "live".into();
+        let view = reference_view(&e, d.path()).unwrap();
+        assert_eq!(view.profile, PROFILE);
+        assert!(view.three_receivers.is_none());
+        e.fault_injected = true;
+        assert!(reference_view(&e, d.path()).is_none());
+        e.fault_injected = false;
+        proof["receivers"][0]["sha256"] = serde_json::json!("different file");
+        store::atomic_json(&path, &proof).unwrap();
+        assert!(reference_view(&e, d.path()).is_none());
+    }
+
     #[test]
     fn real_recording_matches_published_code_while_carrier_and_noise_do_not() {
         let m: Manifest =

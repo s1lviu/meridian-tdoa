@@ -21,7 +21,57 @@ fn safe_id(id: &str) -> bool {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
+
+fn recorder_python(configured: &str) -> Result<PathBuf> {
+    if !configured.contains('/') {
+        return Ok(PathBuf::from(configured));
+    }
+    // The recorder runs from its capture directory. Keep the venv symlink so
+    // Python can find its pyvenv.cfg and installed packages.
+    let path = std::path::absolute(configured)?;
+    ensure!(
+        path.is_file(),
+        "Python interpreter not found: {}",
+        path.display()
+    );
+    Ok(path)
+}
+
+fn iq_center(target: &Target) -> f64 {
+    if target.verification.as_deref() == Some(crate::ibp::PROFILE) {
+        target.frequency_hz - 700.0
+    } else {
+        target.frequency_hz
+    }
+}
+
+pub fn validate_clock(config: &Config, duration_s: u64) -> Result<()> {
+    ensure!((10..=120).contains(&duration_s), "Invalid capture duration");
+    ensure!(
+        valid_evidence(&config.gps_offset_evidence) && (0..=60).contains(&config.gps_utc_offset_s),
+        "Verify the current GPS–UTC offset"
+    );
+    let valid_until = DateTime::parse_from_rfc3339(
+        config
+            .gps_offset_valid_until_utc
+            .as_deref()
+            .context("Missing GPS–UTC revalidation deadline")?,
+    )?;
+    ensure!(
+        valid_until.with_timezone(&Utc)
+            > Utc::now() + chrono::Duration::seconds(duration_s as i64 + 120),
+        "Revalidate the IERS bulletin and GPS–UTC deadline before capture"
+    );
+    Ok(())
+}
+
 pub fn authorize(config: &Config, target: &Target) -> Result<Vec<LiveSource>> {
+    if target.verification.as_deref() == Some(crate::ibp::PROFILE) {
+        ensure!(
+            target.kind == "public_beacon" && crate::ibp::band(target.frequency_hz).is_some(),
+            "IBP capture requires a published beacon channel"
+        );
+    }
     ensure!(
         config.live_enabled,
         "Live capture is disabled in the configuration"
@@ -46,21 +96,7 @@ pub fn authorize(config: &Config, target: &Target) -> Result<Vec<LiveSource>> {
         target.frequency_hz.is_finite() && (6000.0..=30e6).contains(&target.frequency_hz),
         "Invalid frequency"
     );
-    ensure!(
-        valid_evidence(&config.gps_offset_evidence),
-        "Verify the current GPS–UTC offset"
-    );
-    let valid_until = DateTime::parse_from_rfc3339(
-        config
-            .gps_offset_valid_until_utc
-            .as_deref()
-            .context("Missing GPS–UTC revalidation deadline")?,
-    )?;
-    ensure!(
-        valid_until.with_timezone(&Utc)
-            > Utc::now() + chrono::Duration::seconds(target.duration_s as i64 + 120),
-        "Revalidate the IERS bulletin and GPS–UTC deadline before capture"
-    );
+    validate_clock(config, target.duration_s)?;
     let mut sources = vec![];
     let mut devices = HashSet::new();
     for id in &target.source_ids {
@@ -99,8 +135,8 @@ pub fn authorize(config: &Config, target: &Target) -> Result<Vec<LiveSource>> {
             valid_evidence(&s.bands_evidence)
                 && s.bands_hz
                     .iter()
-                    .any(|b| b[0] <= target.frequency_hz - 5000.
-                        && b[1] >= target.frequency_hz + 5000.),
+                    .any(|b| b[0] <= iq_center(target) - 5000.
+                        && b[1] >= iq_center(target) + 5000.),
             "The IQ channel falls outside approved bands: {}",
             s.id
         );
@@ -260,8 +296,53 @@ async fn probe(
     anyhow::bail!("Too many /status redirects")
 }
 
-pub async fn capture(config: &Config, target: &Target, data_dir: &Path) -> Result<PathBuf> {
-    let sources = authorize(config, target)?;
+pub fn last_attempt(data_dir: &Path) -> Result<Option<DateTime<Utc>>> {
+    #[derive(serde::Deserialize)]
+    struct Attempt {
+        utc: DateTime<Utc>,
+    }
+    match std::fs::read(data_dir.join("last-attempt.json")) {
+        Ok(v) => Ok(Some(serde_json::from_slice::<Attempt>(&v)?.utc)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+pub struct Capture {
+    config: Config,
+    target: Target,
+    sources: Vec<LiveSource>,
+    directory: PathBuf,
+    _window: std::sync::Arc<std::fs::File>,
+}
+
+/// Reserve storage and the shared cooldown once before any receiver is contacted.
+pub fn reserve_window(plans: Vec<(Config, Target)>, data_dir: &Path) -> Result<Vec<Capture>> {
+    ensure!(!plans.is_empty(), "Empty capture window");
+    let mut devices = HashSet::new();
+    let mut authorized = Vec::new();
+    for (config, target) in plans {
+        let sources = authorize(&config, &target)?;
+        for s in &sources {
+            ensure!(
+                devices.insert(s.independent_device.clone()),
+                "Receiver already assigned to another band"
+            );
+        }
+        authorized.push((config, target, sources));
+    }
+    std::fs::create_dir_all(data_dir)?;
+    let window = std::sync::Arc::new(
+        std::fs::File::options()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(data_dir.join(".capture-window.lock"))?,
+    );
+    window
+        .try_lock()
+        .context("Could not reserve the IQ archive for this capture window")?;
     fn bytes_in(path: &Path) -> Result<u64> {
         if !path.exists() {
             return Ok(0);
@@ -283,27 +364,44 @@ pub async fn capture(config: &Config, target: &Target, data_dir: &Path) -> Resul
         .map(|s| s.parse::<u64>())
         .transpose()?
         .unwrap_or(2 * 1024 * 1024 * 1024);
-    ensure!(
-        bytes_in(data_dir)?.saturating_add(sources.len() as u64 * 64 * 1024 * 1024) <= quota,
-        "IQ archive quota almost exhausted; export/archive captures before continuing"
-    );
+    if bytes_in(data_dir)?.saturating_add(devices.len() as u64 * 64 * 1024 * 1024) > quota {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::StorageFull,
+            "IQ archive quota almost exhausted; export/archive captures before continuing",
+        )
+        .into());
+    }
     let cooldown = data_dir.join("last-attempt.json");
-    if let Ok(v) = std::fs::read(&cooldown)
-        .and_then(|b| serde_json::from_slice::<Value>(&b).map_err(std::io::Error::other))
-    {
-        if let Some(at) = v["utc"]
-            .as_str()
-            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-        {
-            ensure!(
-                Utc::now().signed_duration_since(at).num_seconds() >= 60,
-                "At least 60 s between capture attempts; no automatic retries"
-            );
-        }
+    if let Some(at) = last_attempt(data_dir)? {
+        ensure!(
+            Utc::now().signed_duration_since(at).num_seconds() >= 60,
+            "At least 60 s between capture attempts; no automatic retries"
+        );
     }
     crate::store::atomic_json(&cooldown, &json!({"utc":Utc::now().to_rfc3339()}))?;
+    Ok(authorized
+        .into_iter()
+        .map(|(config, target, sources)| Capture {
+            config,
+            target,
+            sources,
+            directory: data_dir.to_owned(),
+            _window: window.clone(),
+        })
+        .collect())
+}
+
+pub async fn capture(config: &Config, target: &Target, data_dir: &Path) -> Result<PathBuf> {
+    let mut window = reserve_window(vec![(config.clone(), target.clone())], data_dir)?;
+    record(window.pop().unwrap()).await
+}
+
+pub async fn record(capture: Capture) -> Result<PathBuf> {
+    let config = &capture.config;
+    let target = &capture.target;
+    let sources = capture.sources;
     let id = format!("live-{}", uuid::Uuid::new_v4());
-    let dir = data_dir.join(&id);
+    let dir = capture.directory.join(&id);
     tokio::fs::create_dir_all(dir.join("gnss_pos")).await?;
     let dir = dir.canonicalize()?;
     let client = reqwest::Client::builder()
@@ -313,8 +411,18 @@ pub async fn capture(config: &Config, target: &Target, data_dir: &Path) -> Resul
         .build()?;
     let mut checks = vec![];
     let mut available = vec![];
-    for s in &sources {
-        match probe(&client, s, target.frequency_hz).await {
+    let mut probes = tokio::task::JoinSet::new();
+    let center = iq_center(target);
+    for s in sources {
+        let client = client.clone();
+        probes.spawn(async move {
+            let result = probe(&client, &s, center).await;
+            (s, result)
+        });
+    }
+    while let Some(probe) = probes.join_next().await {
+        let (s, result) = probe?;
+        match result {
             Ok((canonical, observation)) => {
                 checks.push(json!({"source":canonical,"observation":observation}));
                 available.push(canonical);
@@ -323,25 +431,22 @@ pub async fn capture(config: &Config, target: &Target, data_dir: &Path) -> Resul
         }
     }
     crate::store::atomic_json(&dir.join("source-checks.json"), &checks)?;
+    let ibp = target.verification.as_deref() == Some(crate::ibp::PROFILE);
     ensure!(
-        available.len() >= 3,
+        available.len() >= if ibp { 1 } else { 3 },
         "{}: only {} receivers pass current checks; unmonitored interval. See source-checks.json",
         id,
         available.len()
     );
     ensure!(
-        geo::geometry(&available.iter().map(|s| s.position).collect::<Vec<_>>()) > 0.02,
+        ibp || geo::geometry(&available.iter().map(|s| s.position).collect::<Vec<_>>()) > 0.02,
         "Insufficient geometry after current checks"
     );
     let recorder = Path::new(&config.kiwirecorder_path)
         .canonicalize()
         .context("Install KiwiClient with scripts/setup_kiwiclient.sh")?;
     let transport = Path::new("scripts/kiwi_transport.py").canonicalize()?;
-    let python = if config.python.contains('/') {
-        Path::new(&config.python).canonicalize()?
-    } else {
-        PathBuf::from(&config.python)
-    };
+    let python = recorder_python(&config.python)?;
     let capture_time = Utc::now();
     let mut tasks = tokio::task::JoinSet::new();
     // Independent child per physical receiver: one busy/disconnected receiver cannot stop the other captures.
@@ -369,7 +474,7 @@ pub async fn capture(config: &Config, target: &Target, data_dir: &Path) -> Resul
                         "--filename",
                         "capture",
                         "-f",
-                        &(target.frequency_hz / 1000.).to_string(),
+                        &(iq_center(&target) / 1000.).to_string(),
                         "-m",
                         "iq",
                         "--kiwi-wav",
@@ -436,7 +541,7 @@ pub async fn capture(config: &Config, target: &Target, data_dir: &Path) -> Resul
     }
     crate::store::atomic_json(&dir.join("capture-outcomes.json"), &outcomes)?;
     ensure!(
-        receivers.len() >= 3,
+        receivers.len() >= if ibp { 1 } else { 3 },
         "{}: only {} IQ streams saved; no valid TDoA measurement. See capture-outcomes.json and receiver logs",
         id,
         receivers.len()
@@ -448,6 +553,8 @@ pub async fn capture(config: &Config, target: &Target, data_dir: &Path) -> Resul
         kind: target.kind.clone(),
         mode: "live".into(),
         frequency_hz: target.frequency_hz,
+        capture_profile: target.verification.clone(),
+        iq_center_hz: Some(iq_center(target)),
         capture_utc: capture_time.to_rfc3339(),
         gps_utc_offset_s: config.gps_utc_offset_s,
         provenance: target.eligibility_evidence.clone(),
@@ -458,7 +565,7 @@ pub async fn capture(config: &Config, target: &Target, data_dir: &Path) -> Resul
     // Eligibility of a monitored channel never establishes the callsign of a particular emission.
     let path = dir.join("manifest.json");
     crate::store::atomic_json(&path, &manifest)?;
-    if target.verification.as_deref() == Some("dcf77_prn_v1") {
+    if target.verification.as_deref() == Some(crate::protocol::PROFILE) {
         // Failure leaves the durable capture pending review; it never promotes a channel by frequency alone.
         if let Err(e) = crate::protocol::verify(&path) {
             crate::store::atomic_json(
@@ -473,6 +580,21 @@ pub async fn capture(config: &Config, target: &Target, data_dir: &Path) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn recorder_preserves_virtualenv_interpreter_and_path_lookup() {
+        let dir = tempfile::tempdir().unwrap();
+        let system = dir.path().join("system-python");
+        let venv = dir.path().join("venv/bin/python");
+        std::fs::write(&system, []).unwrap();
+        std::fs::create_dir_all(venv.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&system, &venv).unwrap();
+
+        assert_eq!(recorder_python(venv.to_str().unwrap()).unwrap(), venv);
+        assert_eq!(recorder_python("python3").unwrap(), Path::new("python3"));
+    }
+
     #[test]
     fn actual_status_is_accepted_but_api_optout_missing_policy_and_gnss_loss_are_refused() {
         let c: Config = serde_json::from_str(include_str!("../config/live-verified.json")).unwrap();

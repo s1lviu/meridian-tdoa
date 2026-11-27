@@ -13,6 +13,7 @@
     <link rel="stylesheet" href="/style.css" />
     <script defer src="/vendor/leaflet/leaflet.js"></script>
     <script defer src="/vendor/lucide.js"></script>
+    <script defer src="/activity.js"></script>
     <script defer src="/app.js"></script>
   </head>
   <body>
@@ -74,6 +75,10 @@
             <option value="80m">80 metres</option>
             <option value="40m">40 metres</option>
             <option value="20m">20 metres</option>
+            <option value="17m">17 metres</option>
+            <option value="15m">15 metres</option>
+            <option value="12m">12 metres</option>
+            <option value="10m">10 metres</option>
           </select>
         </div>
         <div class="label-row">
@@ -95,7 +100,7 @@
         <label id="follow-live-label" class="catalog-check" hidden><input type="checkbox" id="follow-live" checked> Follow the last UTC hour</label>
         <div class="sidebar-separator"></div>
         <div class="section-heading">
-          <h2>Emissions in view</h2>
+          <h2>TDoA results in view</h2>
           <span class="count" id="emission-count">0</span>
         </div>
         <p class="muted caption">Estimated regions intersecting the map</p>
@@ -120,8 +125,8 @@
         <div class="page-heading">
           <div>
             <div class="eyebrow">RADIO · TIME · SPACE</div>
-            <h1>Putting signals on the map.</h1>
-            <p>Localization by time difference of arrival.</p>
+            <h1 id="page-title">Radio observatory</h1>
+            <p id="page-description">Localization by time difference of arrival.</p>
           </div>
           <div class="mode-switch" role="group" aria-label="Data source">
             <button id="mode-replay" class="selected">
@@ -131,28 +136,44 @@
         </div>
         <div class="observation-bar">
           <div class="observation-type">
-            <span class="badge replay" id="mode-badge">REAL RECORDING</span
-            ><span id="observation-title">Loading the archive…</span>
+            <span class="badge" id="mode-badge">CONNECTING</span
+            ><span id="observation-title">Connecting to the observatory…</span>
           </div>
+          <span id="monitor-clock" class="mono" hidden></span>
           <button id="replay" class="small-button">
             <i data-lucide="rotate-cw"></i>Reprocess
           </button>
         </div>
+        <section id="transmitters" class="history-card transmitter-bar" aria-labelledby="transmitter-title" hidden>
+          <div class="history-head">
+            <h2 id="transmitter-title">Transmitter positions <small>Selected band and UTC interval · worldwide</small></h2>
+            <label class="reception-switch"><input type="checkbox" id="show-reception"> Show reception activity</label>
+          </div>
+          <div id="located-stations" class="station-list" aria-label="Located by TDoA"></div>
+          <p id="station-notice" class="band-note" role="status" hidden></p>
+          <details id="unresolved-stations" open hidden>
+            <summary></summary><div class="station-list"></div>
+          </details>
+        </section>
         <section class="map-card" aria-label="Interactive emission map">
           <div id="map"></div>
           <div class="map-vignette"></div>
           <div class="map-top">
-            <span class="map-caption"
-              ><span class="status-dot"></span>TDoA-ONLY LOCALIZATION</span
-            ><button class="map-action" id="fit">
+            <span class="map-caption" id="map-method"><span class="status-dot"></span>TDoA-ONLY LOCALIZATION</span>
+            <button id="map-activity" class="map-action" type="button" aria-controls="beacon-roster" hidden></button>
+            <button class="map-action" id="fit">
               <i data-lucide="scan"></i>Fit receiver network
             </button>
           </div>
           <div class="map-bottom">
             <div class="legend">
-              <span><b class="legend-region"></b>Region / hypothesis</span
-              ><span><b class="legend-rx"></b>Used in calculation</span
-              ><span><b class="legend-unused"></b>Confirmed reception</span>
+              <span><b class="legend-transmitter"></b>TDoA transmitter</span><span><b class="legend-region"></b>Region / hypothesis</span
+              ><span id="prior-legend" hidden><b class="legend-prior"></b>Previous contour</span
+              ><span class="reception-key"><b class="legend-rx"></b>Used in calculation</span
+              ><span class="reception-key"><b class="legend-unused"></b>Confirmed reception</span>
+              <span id="pool-legend" hidden><b class="legend-pool"></b>Eligible receiver</span>
+              <span id="directory-legend" hidden><b class="legend-directory"></b>Directory receiver</span>
+              <button id="digital-legend" type="button" aria-controls="digital-bands" title="Show digital reports by band" hidden><b class="legend-digital"></b><span></span></button>
             </div>
             <span class="map-position" id="map-position">EUROPE / 5×</span>
           </div>
@@ -173,6 +194,61 @@
             <button id="back-recording" class="primary-button">
               Open the reference recording
             </button>
+          </div>
+        </section>
+        <section id="digital-panel" class="history-card" aria-labelledby="digital-title" hidden>
+          <div class="history-head">
+            <h2 id="digital-title">Digital activity <small>Last 15 UTC minutes</small></h2>
+            <div class="network-controls">
+              <label><input type="checkbox" id="digital-ft8" checked> FT8</label>
+              <label><input type="checkbox" id="digital-wspr" checked> WSPR</label>
+            </div>
+          </div>
+          <p id="digital-status" role="status" class="digital-status"></p>
+          <p class="band-note">Shading shows the transmitter’s reported 20° × 10° region. Several receivers can report the same transmission. Select a region for counts or a band to filter the map.</p>
+          <details id="digital-bands"><summary>Reports by band</summary>
+            <div class="band-table-scroll"><table class="band-table"><thead><tr><th scope="col">Band</th><th scope="col">FT8 reports</th><th scope="col">WSPR reports</th><th scope="col">Latest UTC</th></tr></thead><tbody id="digital-rows"></tbody></table></div>
+          </details>
+          <p class="band-note">PSK Reporter by Philip Gladstone · WSPR reporting networks · MQTT feed by Tom Fanning M0LTE. <a href="https://www.mqtt.pskreporter.info/" target="_blank" rel="noopener noreferrer">Source and coverage ↗</a></p>
+        </section>
+        <section id="beacon-network" class="history-card" aria-labelledby="network-title" hidden>
+          <div class="history-head">
+            <h2 id="network-title">International Beacon Project <small>Scheduled now · UTC</small></h2>
+            <button id="world-network" class="small-button" type="button"><i data-lucide="globe"></i>World view</button>
+          </div>
+          <div id="band-schedule" class="band-schedule" aria-label="Scheduled callsign on each beacon channel"></div>
+          <div class="network-controls">
+            <label><input id="show-pool" type="checkbox" checked> Eligible HF receivers</label>
+            <label><input id="show-directory" type="checkbox" checked> Other directory receivers</label>
+            <button id="all-bands" type="button" class="text-button">Show all bands</button>
+            <a href="https://www.ncdxf.org/beacon/" target="_blank" rel="noopener noreferrer">Beacon schedule ↗</a>
+          </div>
+          <p class="band-note" id="directory-view" role="status"></p>
+          <details id="band-report" open>
+            <summary>Measured reception and accuracy <small>Selected UTC interval · worldwide</small></summary>
+            <div class="band-table-scroll"><table class="band-table">
+              <thead><tr><th scope="col">Band</th><th scope="col">Scheduled attempts</th><th scope="col">Sampled</th><th scope="col">Verified</th><th scope="col">Beacons</th><th scope="col">Unique fixes</th><th scope="col">Ambiguous</th><th scope="col">Evaluated</th><th scope="col">Median error</th><th scope="col">P90 error</th></tr></thead>
+              <tbody id="band-stats"></tbody>
+            </table></div>
+            <p class="band-note">Sampled counts processed UTC windows. HF errors use the centre of the published locator after a unique fix. LF uses the PTB reference. A dash means there is no measured error for that band.</p>
+          </details>
+          <details id="beacon-roster"><summary>Beacon observations <small id="roster-count"></small></summary><div id="roster-list"></div></details>
+        </section>
+        <section id="live-history" class="history-card" aria-labelledby="history-title" hidden>
+          <div class="history-head">
+            <h2 id="history-title">Observation history <small>UTC · newest first</small></h2>
+            <div class="history-actions">
+              <button id="fit-estimates" class="small-button" type="button" hidden>Zoom to contours</button>
+              <button id="latest-fix" class="small-button" type="button">Follow latest</button>
+            </div>
+          </div>
+          <div id="history-fixes" class="history-fixes" aria-label="Observations by UTC time"></div>
+          <div class="comparison-row">
+            <div id="fix-change" aria-live="polite"></div>
+            <div id="receiver-comparison" class="comparison-switch" role="group" aria-label="Compare receivers from the same capture" hidden>
+              <button type="button" id="three-rx" aria-pressed="false">3 receivers</button>
+              <button type="button" id="all-rx" aria-pressed="true">Full network</button>
+            </div>
           </div>
         </section>
         <section class="analysis-card">
@@ -212,6 +288,7 @@
                 Checking the available interval and channels.
               </p>
               <div id="capture-window" class="mono">—</div>
+              <svg id="coverage-track" viewBox="0 0 600 12" preserveAspectRatio="none" role="img" aria-label="Recorded intervals and gaps" hidden></svg>
             </div>
           </div>
         </section>

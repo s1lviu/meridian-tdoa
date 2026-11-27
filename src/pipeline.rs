@@ -37,9 +37,17 @@ pub fn validate_manifest(m: &Manifest) -> Result<()> {
         .contains(&m.kind.as_str()),
         "Target is not eligible"
     );
+    let minimum_receivers = if m.capture_profile.as_deref() == Some(crate::ibp::PROFILE)
+        && m.kind == "public_beacon"
+        && m.mode == "live"
+    {
+        1
+    } else {
+        3
+    };
     ensure!(
-        (3..=8).contains(&m.receivers.len()),
-        "3–8 receivers are required"
+        (minimum_receivers..=8).contains(&m.receivers.len()),
+        "Invalid receiver count for this capture profile"
     );
     ensure!(valid_evidence(&m.provenance), "Missing provenance");
     DateTime::parse_from_rfc3339(&m.capture_utc).context("Invalid UTC timestamp")?;
@@ -82,6 +90,10 @@ pub fn validate_manifest(m: &Manifest) -> Result<()> {
 /// The solver has no parameter for known transmitter coordinates. Evaluation is a separate command.
 pub fn process(manifest_path: &Path, fault_receiver: Option<&str>) -> Result<Emission> {
     let m: Manifest = serde_json::from_slice(&fs::read(manifest_path)?)?;
+    ensure!(
+        m.capture_profile.as_deref() != Some(crate::ibp::PROFILE),
+        "Process IBP captures as individual UTC slots"
+    );
     validate_manifest(&m)?;
     ensure!(
         m.emission_verified,
@@ -174,6 +186,7 @@ pub fn process(manifest_path: &Path, fault_receiver: Option<&str>) -> Result<Emi
         detected: false,
         spectrum: vec![],
         processed_at: Utc::now().to_rfc3339(),
+        reference: None,
     };
     let fs = 12000.;
     let n = (overlap.max(0.).min(120.) * fs) as usize;
@@ -205,6 +218,7 @@ pub fn process(manifest_path: &Path, fault_receiver: Option<&str>) -> Result<Emi
     if overlap < 6. {
         e.detected = e.receivers.iter().any(|r| r.signal_score_db >= 15.);
         e.reason = Some("Captures lack at least 6 s of overlap on the same GNSS timebase".into());
+        e.reference = crate::protocol::reference_view(&e, &root);
         return Ok(e);
     }
     for i in 0..tracks.len() {
@@ -228,10 +242,22 @@ pub fn process(manifest_path: &Path, fault_receiver: Option<&str>) -> Result<Emi
         .receivers
         .iter()
         .any(|r| r.signal_score_db >= 15. || r.confirmed);
+    locate_receptions(&mut e);
+    if !e.detected {
+        e.status = "no_detection".into();
+        e.reason=Some("No emission detected by the spectral/correlation detector in this recorded channel and interval; this does not describe the entire band or map".into());
+    }
+    e.reference = crate::protocol::reference_view(&e, &root);
+    Ok(e)
+}
+
+pub(crate) fn locate_receptions(e: &mut Emission) {
     // Largest fully correlated synchronized subset; other confirmed receptions remain visible.
     let mut best = vec![];
-    for mask in 0usize..(1 << tracks.len()) {
-        let ix: Vec<_> = (0..tracks.len()).filter(|i| mask & (1 << i) != 0).collect();
+    for mask in 0usize..(1 << e.receivers.len()) {
+        let ix: Vec<_> = (0..e.receivers.len())
+            .filter(|i| mask & (1 << i) != 0)
+            .collect();
         if ix.len() <= best.len()
             || ix
                 .iter()
@@ -241,9 +267,11 @@ pub fn process(manifest_path: &Path, fault_receiver: Option<&str>) -> Result<Emi
         }
         if ix.iter().enumerate().all(|(k, &i)| {
             ix[k + 1..].iter().all(|&j| {
-                e.pairs
-                    .iter()
-                    .any(|p| p.a == m.receivers[i].id && p.b == m.receivers[j].id && p.accepted)
+                e.pairs.iter().any(|p| {
+                    p.a == e.receivers[i].receiver.id
+                        && p.b == e.receivers[j].receiver.id
+                        && p.accepted
+                })
             })
         }) {
             best = ix;
@@ -257,7 +285,7 @@ pub fn process(manifest_path: &Path, fault_receiver: Option<&str>) -> Result<Emi
         let dt = |a: usize, b: usize| {
             e.pairs
                 .iter()
-                .find(|p| p.a == m.receivers[a].id && p.b == m.receivers[b].id)
+                .find(|p| p.a == e.receivers[a].receiver.id && p.b == e.receivers[b].receiver.id)
                 .unwrap()
                 .delay_us
         };
@@ -300,11 +328,6 @@ pub fn process(manifest_path: &Path, fault_receiver: Option<&str>) -> Result<Emi
             r.used = false;
         }
     }
-    if !e.detected {
-        e.status = "no_detection".into();
-        e.reason=Some("No emission detected by the spectral/correlation detector in this recorded channel and interval; this does not describe the entire band or map".into());
-    }
-    Ok(e)
 }
 
 pub fn save(result: &Emission, dir: &Path) -> Result<()> {

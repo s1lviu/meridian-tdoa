@@ -5,6 +5,28 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::{path::Path, time::Duration};
 
+fn public_host(s: &str) -> bool {
+    use std::net::IpAddr;
+    match s.trim_matches(['[', ']']).parse::<IpAddr>() {
+        Ok(IpAddr::V4(ip)) => {
+            !ip.is_private()
+                && !ip.is_loopback()
+                && !ip.is_link_local()
+                && !ip.is_multicast()
+                && !ip.is_unspecified()
+                && !ip.is_broadcast()
+                && ip.octets()[0] != 0
+                && ip.octets()[0] < 224
+        }
+        Ok(IpAddr::V6(ip)) => ip.segments()[0] & 0xe000 == 0x2000,
+        Err(_) => {
+            s.contains('.')
+                && !s.trim_end_matches('.').ends_with(".local")
+                && !s.trim_end_matches('.').ends_with(".localhost")
+        }
+    }
+}
+
 pub const URL: &str = "https://cdn.aethersdr.com/kiwi.json";
 pub const CACHE_SECONDS: u64 = 1800;
 
@@ -45,6 +67,20 @@ pub struct Entry {
 }
 
 impl Entry {
+    pub fn published_position(&self) -> Option<[f64; 2]> {
+        self.gps.filter(|&[lat, lon]| {
+            (-90.0..=90.0).contains(&lat)
+                && (-180.0..=180.0).contains(&lon)
+                && (lat != 0. || lon != 0.)
+        })
+    }
+
+    pub fn covers(&self, center_hz: f64) -> bool {
+        self.exclusion().is_none()
+            && self
+                .bands
+                .is_some_and(|b| b[0] <= center_hz - 5000. && b[1] >= center_hz + 5000.)
+    }
     pub fn source(&self, observed_at: &str) -> Result<crate::model::LiveSource> {
         use crate::model::*;
         ensure!(
@@ -119,12 +155,7 @@ impl Entry {
         if !self.ant_connected || self.antenna.is_empty() {
             return Some("antenna undocumented/disconnected");
         }
-        if self.gps.is_none_or(|p| {
-            !p.iter().all(|v| v.is_finite())
-                || p[0].abs() > 90.
-                || p[1].abs() > 180.
-                || p == [0., 0.]
-        }) {
+        if self.published_position().is_none() {
             return Some("invalid position");
         }
         if self
@@ -139,7 +170,7 @@ impl Entry {
         }
         if reqwest::Url::parse(&self.url).ok().is_none_or(|u| {
             u.scheme() != "http"
-                || u.host_str().is_none()
+                || u.host_str().is_none_or(|h| !public_host(h))
                 || u.path() != "/"
                 || !u.username().is_empty()
                 || u.password().is_some()
@@ -158,6 +189,80 @@ pub struct Directory {
     #[serde(default)]
     pub retrieved_at: Option<String>,
     pub receivers: Vec<Entry>,
+}
+
+impl Directory {
+    /// Visit every eligible receiver as an anchor, alternating geographic cells.
+    /// Its surrounding network depends only on receiver metadata and the channel.
+    pub fn network(
+        &self,
+        center: f64,
+        round: usize,
+        limit: usize,
+    ) -> Result<Vec<crate::model::LiveSource>> {
+        self.network_excluding(center, round, limit, &std::collections::HashSet::new())
+    }
+    pub fn network_excluding(
+        &self,
+        center: f64,
+        round: usize,
+        limit: usize,
+        reserved: &std::collections::HashSet<String>,
+    ) -> Result<Vec<crate::model::LiveSource>> {
+        use crate::{geo, model::Point};
+        use std::collections::{BTreeMap, HashSet};
+        let mut unique = HashSet::new();
+        let mut candidates: Vec<_> = self
+            .receivers
+            .iter()
+            .filter(|r| !reserved.contains(&r.id) && r.covers(center) && unique.insert(&r.id))
+            .collect();
+        ensure!(
+            candidates.len() >= 3,
+            "Fewer than three eligible directory receivers on this channel"
+        );
+        candidates.sort_by_key(|r| &r.id);
+        let mut cells = BTreeMap::<(i16, i16), Vec<&Entry>>::new();
+        let point = |r: &Entry| {
+            let [lat, lon] = r.gps.unwrap();
+            Point { lat, lon }
+        };
+        for &r in &candidates {
+            let p = point(r);
+            cells
+                .entry(((p.lat / 25.).floor() as i16, (p.lon / 40.).floor() as i16))
+                .or_default()
+                .push(r);
+        }
+        let mut order: Vec<_> = cells
+            .values()
+            .flat_map(|cell| cell.iter().enumerate().map(|(i, r)| (i, *r)))
+            .collect();
+        order.sort_by_key(|(depth, _)| *depth);
+        let first = order[round % order.len()].1;
+        let anchor = point(first);
+        candidates.sort_by(|a, b| {
+            geo::distance(point(a), anchor).total_cmp(&geo::distance(point(b), anchor))
+        });
+        let mut chosen = vec![first];
+        for spacing in [150.0, 0.0] {
+            for &r in &candidates {
+                if chosen.len() >= limit {
+                    break;
+                }
+                if chosen
+                    .iter()
+                    .all(|s| s.id != r.id && geo::distance(point(s), point(r)) > spacing)
+                {
+                    chosen.push(r);
+                }
+            }
+        }
+        chosen
+            .into_iter()
+            .map(|r| r.source(&self.fetched_at))
+            .collect()
+    }
 }
 
 pub fn parse(bytes: &[u8]) -> Result<Directory> {
@@ -222,6 +327,25 @@ pub async fn refresh(path: &Path) -> Result<Directory> {
 mod tests {
     use super::*;
     #[test]
+    fn receiver_rotation_covers_every_eligible_anchor() {
+        let d = parse(include_bytes!("../evidence/live/directory.json")).unwrap();
+        let center = 14_099_300.;
+        let eligible: std::collections::HashSet<_> = d
+            .receivers
+            .iter()
+            .filter(|r| r.covers(center))
+            .map(|r| r.id.clone())
+            .collect();
+        let mut visited = std::collections::HashSet::new();
+        for round in 0..eligible.len() {
+            let batch = d.network(center, round, 8).unwrap();
+            assert_eq!(batch.len(), 8);
+            assert!(batch.iter().all(|s| eligible.contains(&s.id)));
+            visited.insert(batch[0].id.clone());
+        }
+        assert_eq!(visited, eligible);
+    }
+    #[test]
     fn published_access_and_gnss_are_required_and_catalog_is_not_rf_evidence() {
         let bytes = std::fs::read("evidence/live/directory.json").unwrap();
         let d = parse(&bytes).unwrap();
@@ -240,6 +364,14 @@ mod tests {
         r.ext_api = Some(1);
         r.gps_good = 0;
         assert_eq!(r.exclusion(), Some("Insufficient directory GNSS status"));
+        assert_eq!(r.published_position(), r.gps);
+        assert!(!r.covers(14_100_000.));
+        for gps in [None, Some([0., 0.]), Some([91., 15.]), Some([0., f64::NAN])] {
+            r.gps = gps;
+            assert!(r.published_position().is_none());
+        }
+        r.gps = Some([0., -15.]);
+        assert_eq!(r.published_position(), r.gps);
         assert!(
             parse(br#"{"schema":2,"receivers":[],"fetched_at":"2026-11-26T00:00:00Z"}"#).is_err()
         );

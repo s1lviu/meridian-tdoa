@@ -37,6 +37,10 @@ pub struct Manifest {
     pub kind: String,
     pub mode: String,
     pub frequency_hz: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iq_center_hz: Option<f64>,
     pub capture_utc: String,
     pub gps_utc_offset_s: i64,
     pub provenance: Evidence,
@@ -84,6 +88,24 @@ pub struct Estimate {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReceiverComparison {
+    pub receiver_ids: Vec<String>,
+    #[serde(default)]
+    pub selection: String,
+    pub solutions: Vec<Estimate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerifiedReference {
+    pub profile: String,
+    pub three_receivers: Option<ReceiverComparison>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cw: Vec<crate::ibp::ReceiverEvidence>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Emission {
     pub id: String,
     pub dataset_id: String,
@@ -105,6 +127,8 @@ pub struct Emission {
     pub detected: bool,
     pub spectrum: Vec<[f64; 2]>,
     pub processed_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<VerifiedReference>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -149,6 +173,8 @@ pub struct Target {
 pub struct Config {
     pub listen: String,
     pub live_enabled: bool,
+    #[serde(default)]
+    pub digital_reports: bool,
     pub kiwirecorder_path: String,
     pub python: String,
     pub gps_utc_offset_s: i64,
@@ -157,4 +183,22 @@ pub struct Config {
     pub gps_offset_valid_until_utc: Option<String>,
     pub sources: Vec<LiveSource>,
     pub targets: Vec<Target>,
+    #[serde(default)]
+    pub monitor: Option<MonitorConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MonitorConfig {
+    pub target_id: String,
+    pub interval_s: u64,
+    #[serde(default)]
+    pub additional_target_ids: Vec<String>,
+    #[serde(default)]
+    pub directory_receivers: usize,
+    #[serde(default = "one_band")]
+    pub parallel_bands: usize,
+}
+
+fn one_band() -> usize {
+    1
 }

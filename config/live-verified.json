@@ -208,6 +208,96 @@
       ],
       "duration_s": 30,
       "verification": "dcf77_prn_v1"
+    },
+    {
+      "id": "ibp-20m",
+      "kind": "public_beacon",
+      "frequency_hz": 14100000,
+      "eligibility_evidence": {
+        "url": "https://www.ncdxf.org/beacon/",
+        "note": "NCDXF/IARU International Beacon Project public shared channel. Validate the scheduled CW callsign in each separate UTC slot."
+      },
+      "source_ids": [
+        "f82e0c018380",
+        "00aafd2d3947",
+        "147f0fdf7a94",
+        "f82e0c136d0e",
+        "0cb2b7d6cd86"
+      ],
+      "duration_s": 30,
+      "verification": "ncdxf_cw_v1"
+    },
+    {
+      "id": "ibp-17m",
+      "kind": "public_beacon",
+      "frequency_hz": 18110000,
+      "eligibility_evidence": {
+        "url": "https://www.ncdxf.org/beacon/",
+        "note": "NCDXF/IARU International Beacon Project public shared channel. Validate the scheduled CW callsign in each separate UTC slot."
+      },
+      "source_ids": [
+        "f82e0c018380",
+        "00aafd2d3947",
+        "147f0fdf7a94",
+        "f82e0c136d0e",
+        "0cb2b7d6cd86"
+      ],
+      "duration_s": 30,
+      "verification": "ncdxf_cw_v1"
+    },
+    {
+      "id": "ibp-15m",
+      "kind": "public_beacon",
+      "frequency_hz": 21150000,
+      "eligibility_evidence": {
+        "url": "https://www.ncdxf.org/beacon/",
+        "note": "NCDXF/IARU International Beacon Project public shared channel. Validate the scheduled CW callsign in each separate UTC slot."
+      },
+      "source_ids": [
+        "f82e0c018380",
+        "00aafd2d3947",
+        "147f0fdf7a94",
+        "f82e0c136d0e",
+        "0cb2b7d6cd86"
+      ],
+      "duration_s": 30,
+      "verification": "ncdxf_cw_v1"
+    },
+    {
+      "id": "ibp-12m",
+      "kind": "public_beacon",
+      "frequency_hz": 24930000,
+      "eligibility_evidence": {
+        "url": "https://www.ncdxf.org/beacon/",
+        "note": "NCDXF/IARU International Beacon Project public shared channel. Validate the scheduled CW callsign in each separate UTC slot."
+      },
+      "source_ids": [
+        "f82e0c018380",
+        "00aafd2d3947",
+        "147f0fdf7a94",
+        "f82e0c136d0e",
+        "0cb2b7d6cd86"
+      ],
+      "duration_s": 30,
+      "verification": "ncdxf_cw_v1"
+    },
+    {
+      "id": "ibp-10m",
+      "kind": "public_beacon",
+      "frequency_hz": 28200000,
+      "eligibility_evidence": {
+        "url": "https://www.ncdxf.org/beacon/",
+        "note": "NCDXF/IARU International Beacon Project public shared channel. Validate the scheduled CW callsign in each separate UTC slot."
+      },
+      "source_ids": [
+        "f82e0c018380",
+        "00aafd2d3947",
+        "147f0fdf7a94",
+        "f82e0c136d0e",
+        "0cb2b7d6cd86"
+      ],
+      "duration_s": 30,
+      "verification": "ncdxf_cw_v1"
     }
   ],
   "gps_offset_valid_until_utc": "2027-01-01T00:00:00Z"

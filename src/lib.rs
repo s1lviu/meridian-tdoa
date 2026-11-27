@@ -2,6 +2,7 @@ pub mod capture;
 pub mod directory;
 pub mod dsp;
 pub mod geo;
+pub mod ibp;
 pub mod kiwi;
 pub mod model;
 pub mod pipeline;
