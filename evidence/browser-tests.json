@@ -1,11 +1,12 @@
 {
- "executed_at": "2026-11-27T20:35:50.723Z",
+ "executed_at": "2026-11-27T23:42:00.877Z",
  "checks": [
   "recording: two mirror hypotheses, no unique fix, three receivers listed",
   "GNSS-loss replay: receiver excluded, no region drawn",
   "foreground live map measures RF-to-display latency from the hardware timestamp",
   "live: own-node detections located, registered as a track and inspectable",
   "observation inspector: located, five receivers, pair delays",
+  "two live fixes have P50/P90 and counts, reloading keeps only measured API latency",
   "390 px layout without horizontal overflow",
   "no page errors"
  ]

@@ -15,7 +15,7 @@ const ago = (t) => {
 const icons = () => window.lucide?.createIcons();
 const PROFILE = { ft8_v1: "FT8", dcf77_prn_v1: "DCF77", correlated_v1: "Unknown", mlat_v1: "Node", ncdxf_cw_v1: "IBP" };
 
-const state = { mode: "live", info: null, data: null, tracks: [], selected: null, refreshing: false, pending: false, scenario: "normal" };
+const state = { mode: "live", info: null, data: null, tracks: [], stats: [], statsStart: 0, selected: null, refreshing: false, pending: false, scenario: "normal" };
 const map = L.map("map", { worldCopyJump: true, zoomSnap: 0.25, minZoom: 1, maxZoom: 14, zoomControl: false }).setView([35, 5], 2.5);
 L.control.zoom({ position: "bottomright" }).addTo(map);
 L.control.scale({ imperial: false, position: "bottomright" }).addTo(map);
@@ -113,7 +113,8 @@ function interval() {
 
 // Measure only newly drawn observations received while this live view is visible.
 let viewScope = "", visibleSince = 0, lastDrawn = new Set();
-let paintSamples = [];
+const paintSamples = new Map();
+const paintHistoryMs = 3600e3 * Math.max(...Array.from($("window").options, option => Number(option.value)));
 function resetPaintWindow() {
   viewScope = "";
   visibleSince = Date.now();
@@ -123,7 +124,7 @@ document.addEventListener("visibilitychange", () => {
   resetPaintWindow();
   if (!document.hidden && state.mode === "live") refresh();
 });
-function measureMap(scope, start, stats) {
+function measureMap(scope) {
   const current = new Set(), arrived = [];
   for (const {track} of state.tracks) {
     const id = track.observations.at(-1);
@@ -137,17 +138,16 @@ function measureMap(scope, start, stats) {
   if (scope !== viewScope) visibleSince = Date.now();
   viewScope = scope;
   lastDrawn = current;
-  paintSamples = paintSamples.filter(s => s.at >= Date.parse(start));
   if (!arrived.length || document.hidden) return;
   requestAnimationFrame(() => requestAnimationFrame(() => {
     if (scope !== viewScope || document.hidden) return;
     const seen = Date.now();
     for (const sample of arrived) {
-      if (seen >= sample.at && !paintSamples.some(x => x.id === sample.id)) {
-        paintSamples.push({...sample, seconds: (seen - sample.at) / 1000});
+      if (seen >= sample.at && sample.at >= visibleSince && !paintSamples.has(sample.id)) {
+        paintSamples.set(sample.id, {...sample, seconds: (seen - sample.at) / 1000});
       }
     }
-    drawStats(stats);
+    drawStats();
   }));
 }
 
@@ -169,8 +169,10 @@ async function refresh() {
     drawTracks();
     drawFixes(profile);
     drawLists(profile);
-    drawStats(stats?.rows || []);
-    if (state.mode === "live") measureMap(scope, start, stats?.rows || []);
+    state.stats = stats?.rows || [];
+    state.statsStart = Date.parse(start);
+    drawStats();
+    if (state.mode === "live") measureMap(scope);
     if (state.mode === "live") {
       const obs = data.monitoring?.segments?.length || 0;
       const next = data.observatory?.next_at ? ` · next window ${utc(data.observatory.next_at).slice(11, 19)}` : data.observatory?.notice ? ` · ${data.observatory.notice}` : "";
@@ -247,15 +249,27 @@ function drawLists(profile) {
 
 const pct = (x) => x == null ? "—" : fmt(100 * x) + "%";
 
-function drawStats(rows) {
+function latencyText(p50, p90, count) {
+  return count > 0 ? `${fmt(p50, 1)} / ${fmt(p90, 1)} s (${fmt(count)})` : "—";
+}
+
+function drawStats() {
+  const rows = state.stats;
   const body = $("stats-body");
   body.innerHTML = "";
+  const oldest = Date.now() - paintHistoryMs;
+  const samples = [];
+  for (const [id, sample] of paintSamples) {
+    if (sample.at < oldest) paintSamples.delete(id);
+    else if (sample.at >= state.statsStart) samples.push(sample);
+  }
   for (const r of rows.sort((a, b) => b.located - a.located || b.heard - a.heard)) {
     const tr = document.createElement("tr");
-    const values = paintSamples.filter(s => s.profile === r.profile && s.band === r.band).map(s => s.seconds).sort((a,b) => a-b);
-    const mid = Math.floor(values.length / 2);
-    const median = values.length ? (values[mid] + values[Math.floor((values.length - 1) / 2)]) / 2 : null;
-    tr.innerHTML = `<td>${esc(PROFILE[r.profile] || r.profile)} · ${esc(r.band)}</td><td>${r.heard}</td><td>${r.timed_two_plus}</td><td>${r.located}</td><td>${fmt(r.fixes_per_hour, 2)}</td><td>${km(r.median_error_km)} / ${km(r.p90_error_km)}</td><td>${pct(r.ellipse_68_coverage)} / ${pct(r.contour_coverage)}</td><td>${r.median_publication_latency_s == null ? "—" : fmt(r.median_publication_latency_s, 1) + " s"}</td><td class="paint-delay">${median == null ? "—" : fmt(median, 1) + " s (" + values.length + ")"}</td>`;
+    const values = samples.filter(s => s.profile === r.profile && s.band === r.band).map(s => s.seconds).sort((a, b) => a - b);
+    const n = values.length;
+    const median = n ? (values[Math.floor((n - 1) / 2)] + values[Math.floor(n / 2)]) / 2 : null;
+    const p90 = n ? values[Math.ceil(0.9 * n) - 1] : null;
+    tr.innerHTML = `<td>${esc(PROFILE[r.profile] || r.profile)} · ${esc(r.band)}</td><td>${r.heard}</td><td>${r.timed_two_plus}</td><td>${r.located}</td><td>${fmt(r.fixes_per_hour, 2)}</td><td>${km(r.median_error_km)} / ${km(r.p90_error_km)}</td><td>${pct(r.ellipse_68_coverage)} / ${pct(r.contour_coverage)}</td><td class="api-delay">${latencyText(r.median_publication_latency_s, r.p90_publication_latency_s, r.publication_latency_count)}</td><td class="paint-delay">${latencyText(median, p90, n)}</td>`;
     body.append(tr);
   }
   if (!rows.length) body.innerHTML = `<tr><td colspan="9" class="note">${state.mode === "live" ? "No live observation in this window." : "Live statistics only."}</td></tr>`;

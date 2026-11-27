@@ -74,15 +74,18 @@ try {
   await page.locator("#mode-live").click();
   await page.waitForFunction(() => document.querySelector("#stats-body")?.innerText.includes("No live observation"));
   const target = [44.36, 26.2];
-  const now = Date.now() / 1000;
-  for (const [id, p] of Object.entries(nodes)) {
-    const r = await fetch(base + "/api/detections", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: "Bearer " + tokens[id] },
-      body: JSON.stringify({ frequency_hz: 145.8e6, detections: [{ node: id, signal: "beacon-42", local_s: now + dist(target, p) / C, sigma_s: 1e-7 }] }),
-    });
-    assert.equal(r.status, 200);
+  async function sendBeacon(signal) {
+    const now = Date.now() / 1000;
+    for (const [id, p] of Object.entries(nodes)) {
+      const r = await fetch(base + "/api/detections", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: "Bearer " + tokens[id] },
+        body: JSON.stringify({ frequency_hz: 145.8e6, detections: [{ node: id, signal, local_s: now + dist(target, p) / C, sigma_s: 1e-7 }] }),
+      });
+      assert.equal(r.status, 200);
+    }
   }
+  await sendBeacon("beacon-42");
   await page.waitForFunction(() => document.querySelectorAll("#track-list li").length > 0, null, { timeout: 15000 });
   await page.waitForFunction(() => /s \(1\)/.test(document.querySelector(".paint-delay")?.textContent || ""));
   ok("foreground live map measures RF-to-display latency from the hardware timestamp");
@@ -103,6 +106,19 @@ try {
   assert.equal(await page.locator("#inspector .rx-row").count(), 5);
   ok("observation inspector: located, five receivers, pair delays");
   await page.screenshot({ path: join(repo, "evidence/live.png") });
+
+  await sendBeacon("beacon-43");
+  await page.waitForFunction(() => document.querySelector(".paint-delay")?.textContent.endsWith(" s (2)"));
+  for (const column of [".api-delay", ".paint-delay"]) {
+    const match = /^(\d+\.\d) \/ (\d+\.\d) s \(2\)$/.exec(await page.locator(column).innerText());
+    assert.ok(match && Number(match[2]) >= Number(match[1]), `ordered percentiles and sample count in ${column}`);
+  }
+  await page.reload();
+  await page.locator("#mode-replay[aria-selected='true']").waitFor();
+  await page.locator("#mode-live").click();
+  await page.waitForFunction(() => document.querySelector(".api-delay")?.textContent.endsWith(" s (2)"));
+  assert.equal(await page.locator(".paint-delay").innerText(), "—");
+  ok("two live fixes have P50/P90 and counts, reloading keeps only measured API latency");
 
   const mobile = await browser.newPage({ viewport: { width: 390, height: 844 }, isMobile: true });
   await mobile.goto(base + "/", { waitUntil: "load" });
