@@ -343,33 +343,16 @@ pub fn reserve_window(plans: Vec<(Config, Target)>, data_dir: &Path) -> Result<V
     window
         .try_lock()
         .context("Could not reserve the IQ archive for this capture window")?;
-    fn bytes_in(path: &Path) -> Result<u64> {
-        if !path.exists() {
-            return Ok(0);
-        }
-        let mut size = 0u64;
-        for entry in std::fs::read_dir(path)? {
-            let entry = entry?;
-            let m = entry.metadata()?;
-            if m.is_file() {
-                size = size.saturating_add(m.len());
-            } else if m.is_dir() {
-                size = size.saturating_add(bytes_in(&entry.path())?);
-            }
-        }
-        Ok(size)
-    }
     let quota = std::env::var("MERIDIAN_CAPTURE_QUOTA_BYTES")
         .ok()
         .map(|s| s.parse::<u64>())
         .transpose()?
         .unwrap_or(2 * 1024 * 1024 * 1024);
-    if bytes_in(data_dir)?.saturating_add(devices.len() as u64 * 64 * 1024 * 1024) > quota {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::StorageFull,
-            "IQ archive quota almost exhausted; export/archive captures before continuing",
-        )
-        .into());
+    // Rolling archive: evict the oldest raw IQ first; refuse only when eviction cannot make room.
+    if let Err(e) =
+        crate::retention::enforce_quota(data_dir, quota, devices.len() as u64 * 64 * 1024 * 1024)
+    {
+        return Err(std::io::Error::new(std::io::ErrorKind::StorageFull, e.to_string()).into());
     }
     let cooldown = data_dir.join("last-attempt.json");
     if let Some(at) = last_attempt(data_dir)? {

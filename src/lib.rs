@@ -1,5 +1,6 @@
 pub mod bands;
 pub mod capture;
+pub mod db;
 pub mod directory;
 pub mod dsp;
 pub mod geo;
@@ -8,4 +9,5 @@ pub mod kiwi;
 pub mod model;
 pub mod pipeline;
 pub mod protocol;
+pub mod retention;
 pub mod store;

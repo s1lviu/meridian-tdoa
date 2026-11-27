@@ -65,8 +65,12 @@ pub(super) fn snapshot(app: &App) -> Value {
         return Value::Null;
     };
     let status = app.monitor.read().unwrap().clone();
-    let jobs = app.jobs.read().unwrap();
-    let batch:Vec<_> = status.last_jobs.iter().filter_map(|id| jobs.get(id)).map(|j|json!({"id":j["id"],"status":j["status"],
+    let jobs: Vec<Value> = status
+        .last_jobs
+        .iter()
+        .filter_map(|id| app.db.job(id).ok().flatten())
+        .collect();
+    let batch:Vec<_> = jobs.iter().map(|j|json!({"id":j["id"],"status":j["status"],
         "started_at":j["started_at"],"updated_at":j["updated_at"],"emission_id":j["emission_id"],"target_id":j["monitor_target"],"verified_slots":j["verified_slots"],"sampled_slots":j["sampled_slots"],"captured_receivers":j["captured_receivers"]})).collect();
     json!({"target_id":settings.target_id,"interval_s":settings.interval_s,"next_at":status.next_at,
         "next_target_id":status.next_targets.first(),"next_target_ids":status.next_targets,"additional_target_ids":settings.additional_target_ids,"directory_receivers":settings.directory_receivers,
@@ -145,29 +149,22 @@ pub(super) async fn run(app: App, settings: MonitorConfig, targets: Vec<Target>)
     let interval = TimeDelta::seconds(settings.interval_s as i64);
     let mut earliest = Utc::now();
     let (mut index, last_id, mut rounds) = {
-        let jobs = app.jobs.read().unwrap();
-        let latest = jobs
-            .values()
-            .filter_map(|j| {
-                let index = targets
-                    .iter()
-                    .position(|t| Some(t.id.as_str()) == j["monitor_target"].as_str())?;
-                Some((j["started_at"].as_str()?, index, j["id"].as_str()?))
-            })
-            .max();
+        let (latest, counts) = app.db.monitor_history().unwrap_or_default();
         let rounds: Vec<_> = targets
             .iter()
             .map(|t| {
-                let count = jobs
-                    .values()
-                    .filter(|j| j["monitor_target"].as_str() == Some(t.id.as_str()))
-                    .count();
+                let count = counts
+                    .iter()
+                    .find(|(id, _)| id == &t.id)
+                    .map_or(0, |(_, n)| *n);
                 count + ibp::band(t.frequency_hz).unwrap_or(0)
             })
             .collect();
-        let (index, id) = latest.map_or((0, None), |(_, i, id)| {
-            ((i + 1) % targets.len(), Some(id.to_string()))
+        let resume = latest.and_then(|(target, id)| {
+            let i = targets.iter().position(|t| t.id == target)?;
+            Some(((i + 1) % targets.len(), id))
         });
+        let (index, id) = resume.map_or((0, None), |(i, id)| (i, Some(id)));
         (index, id, rounds)
     };
     app.monitor.write().unwrap().last_jobs = last_id.into_iter().collect();
@@ -277,10 +274,10 @@ pub(super) async fn run(app: App, settings: MonitorConfig, targets: Vec<Target>)
                     }
                     for id in &work_ids {
                         if app
-                            .jobs
-                            .read()
-                            .unwrap()
-                            .get(id)
+                            .db
+                            .job(id)
+                            .ok()
+                            .flatten()
                             .is_some_and(|j| j["status"] == "running")
                         {
                             failed(&app, id, "Band worker interrupted");
@@ -301,13 +298,10 @@ pub(super) async fn run(app: App, settings: MonitorConfig, targets: Vec<Target>)
                 }
             }
         }
-        if ids.iter().any(|id| {
-            app.jobs
-                .read()
-                .unwrap()
-                .get(id)
-                .is_some_and(|j| j.get("persistence_error").is_some())
-        }) {
+        if ids
+            .iter()
+            .any(|id| app.persistence_failures.lock().unwrap().contains(id))
+        {
             break "Could not save the capture job. Check storage before restarting the monitor."
                 .into();
         }

@@ -115,7 +115,7 @@ pub fn bands(
     results: &[Emission],
     start: DateTime<Utc>,
     end: DateTime<Utc>,
-    jobs: &HashMap<String, Value>,
+    jobs: &[Value],
     targets: &[meridian_tdoa::model::Target],
 ) -> Vec<Value> {
     let mut rows = vec![];
@@ -162,7 +162,7 @@ pub fn bands(
             .map(|t| t.id.as_str())
             .collect();
         let attempts = jobs
-            .values()
+            .iter()
             .filter(|j| {
                 j["monitor_target"]
                     .as_str()
@@ -230,7 +230,7 @@ mod tests {
             &[e, resolved],
             date,
             date + chrono::Duration::hours(1),
-            &HashMap::new(),
+            &[],
             &[],
         );
         assert_eq!(stats[1]["ambiguous"], 1);

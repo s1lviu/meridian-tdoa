@@ -6,14 +6,20 @@ use axum::{
     routing::{get, post},
 };
 use chrono::{DateTime, Utc};
-use meridian_tdoa::{bands, capture, directory, geo, ibp, model::*, pipeline, protocol, store};
+use meridian_tdoa::{
+    bands, capture,
+    db::{self, Db},
+    directory, geo, ibp,
+    model::*,
+    pipeline, retention, store,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{
-        Arc, RwLock,
+        Arc, Mutex, RwLock,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -24,8 +30,8 @@ mod monitor;
 #[derive(Clone)]
 struct App {
     config: Arc<Config>,
-    results: Arc<RwLock<Vec<Emission>>>,
-    jobs: Arc<RwLock<HashMap<String, Value>>>,
+    db: Arc<Db>,
+    persistence_failures: Arc<Mutex<HashSet<String>>>,
     busy: Arc<AtomicBool>,
     datasets: Arc<Vec<(Manifest, PathBuf)>>,
     token: Arc<Option<String>>,
@@ -153,19 +159,22 @@ fn selection(q: Filters) -> Result<Selection, Error> {
         fault: scenario == "sync-loss",
     })
 }
-fn matches(e: &Emission, s: &Selection) -> bool {
-    let (Ok(a), Ok(b)) = (
-        DateTime::parse_from_rfc3339(&e.start_utc),
-        DateTime::parse_from_rfc3339(&e.end_utc),
-    ) else {
-        return false;
-    };
-    e.mode == s.mode
-        && e.fault_injected == s.fault
-        && e.frequency_hz >= s.low
-        && e.frequency_hz < s.high
-        && a < s.end
-        && b > s.start
+fn internal(e: impl std::fmt::Display) -> Error {
+    Error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+}
+/// Every observation matching the non-geographic filters, newest first.
+fn select(app: &App, s: &Selection) -> Result<Vec<Emission>, Error> {
+    app.db
+        .emissions(&db::Query {
+            mode: s.mode.clone(),
+            fault: s.fault,
+            low_hz: s.low,
+            high_hz: s.high,
+            start_ms: s.start.timestamp_millis(),
+            end_ms: s.end.timestamp_millis(),
+            limit: 50_000,
+        })
+        .map_err(internal)
 }
 // Observations arrive newest first. Earlier contours are reusable only for fixed reference beacons.
 fn latest_signals<'a>(selected: &[&'a Emission]) -> Vec<(&'a Emission, Option<&'a Emission>)> {
@@ -231,14 +240,8 @@ fn reviewed_emissions_keep_their_own_measurement() {
 async fn emissions(State(app): State<App>, Query(q): Query<Filters>) -> Api<Value> {
     let compact = q.compact;
     let s = selection(q)?;
-    let results = app.results.read().unwrap();
-    let mut selected: Vec<_> = results.iter().filter(|e| matches(e, &s)).collect();
-    selected.sort_by_cached_key(|e| {
-        (
-            std::cmp::Reverse(DateTime::parse_from_rfc3339(&e.start_utc).ok()),
-            e.id.as_str(),
-        )
-    });
+    let results = select(&app, &s)?;
+    let selected: Vec<&Emission> = results.iter().collect();
     let row = |e: &&Emission| {
         if !compact {
             return json!(e);
@@ -284,13 +287,11 @@ async fn emissions(State(app): State<App>, Query(q): Query<Filters>) -> Api<Valu
         })
         .collect();
     let band_stats = if compact && s.mode == "live" && !s.fault {
-        evaluation::bands(
-            &results,
-            s.start,
-            s.end,
-            &app.jobs.read().unwrap(),
-            &app.config.targets,
-        )
+        let jobs = app
+            .db
+            .jobs_between(s.start.timestamp_millis(), s.end.timestamp_millis())
+            .map_err(internal)?;
+        evaluation::bands(&results, s.start, s.end, &jobs, &app.config.targets)
     } else {
         Vec::new()
     };
@@ -334,21 +335,17 @@ async fn emissions(State(app): State<App>, Query(q): Query<Filters>) -> Api<Valu
     ))
 }
 async fn detail(State(app): State<App>, ApiPath(id): ApiPath<String>) -> Api<Emission> {
-    app.results
-        .read()
-        .unwrap()
-        .iter()
-        .find(|e| e.id == id)
-        .cloned()
+    app.db
+        .emission(&id)
+        .map_err(internal)?
         .map(Json)
         .ok_or(Error(StatusCode::NOT_FOUND, "Emission not found".into()))
 }
 async fn evaluate_observation(State(app): State<App>, ApiPath(id): ApiPath<String>) -> Api<Value> {
-    app.results
-        .read()
-        .unwrap()
-        .iter()
-        .find(|e| e.id == id)
+    app.db
+        .emission(&id)
+        .map_err(internal)?
+        .as_ref()
         .and_then(evaluation::report)
         .map(Json)
         .ok_or(Error(
@@ -409,7 +406,7 @@ fn pending_captures() -> Vec<Manifest> {
 
 async fn info(State(app): State<App>) -> Json<Value> {
     Json(
-        json!({"name":"Meridian","version":env!("CARGO_PKG_VERSION"),"live_enabled":app.config.live_enabled,"band_ranges_mhz":bands::BANDS,"admin_configured":app.token.is_some(),"sources":app.config.sources,"targets":app.config.targets,"pending_captures":pending_captures(),"busy":app.busy.load(Ordering::SeqCst),"latest_live":app.results.read().unwrap().iter().filter(|e|e.mode=="live").map(|e| &e.start_utc).max(),"datasets":app.datasets.iter().map(|(m,_)|m).collect::<Vec<_>>(),"policy":"Public beacons, participating stations and the public DCF77 time reference for commissioning. Identity is not inferred from frequency or position."}),
+        json!({"name":"Meridian","version":env!("CARGO_PKG_VERSION"),"live_enabled":app.config.live_enabled,"band_ranges_mhz":bands::BANDS,"admin_configured":app.token.is_some(),"sources":app.config.sources,"targets":app.config.targets,"pending_captures":pending_captures(),"busy":app.busy.load(Ordering::SeqCst),"latest_live":app.db.latest_live_start().ok().flatten().and_then(DateTime::from_timestamp_millis),"datasets":app.datasets.iter().map(|(m,_)|m).collect::<Vec<_>>(),"policy":"Public beacons, participating stations and the public DCF77 time reference for commissioning. Identity is not inferred from frequency or position."}),
     )
 }
 #[derive(Default, Deserialize)]
@@ -511,21 +508,14 @@ fn reserve_worker(app: &App) -> Result<WorkGuard, Error> {
     Ok(guard)
 }
 fn new_job(app: &App, monitor_target: Option<&str>) -> Result<String, Error> {
-    if app.jobs.read().unwrap().len() >= 10000 {
-        return Err(Error(
-            StatusCode::INSUFFICIENT_STORAGE,
-            "Export/archive the job history before continuing".into(),
-        ));
-    }
     let id = uuid::Uuid::new_v4().to_string();
     let mut value = json!({"id":id,"status":"running","started_at":Utc::now().to_rfc3339()});
     if let Some(target) = monitor_target {
         value["monitor_target"] = json!(target);
     }
-    if let Err(e) = store::job(&id, &value) {
+    if let Err(e) = app.db.put_job(&id, &value) {
         return Err(Error(StatusCode::INSUFFICIENT_STORAGE, e.to_string()));
     }
-    app.jobs.write().unwrap().insert(id.clone(), value);
     Ok(id)
 }
 fn lock_job(app: &App) -> Result<(String, WorkGuard), Error> {
@@ -534,22 +524,40 @@ fn lock_job(app: &App) -> Result<(String, WorkGuard), Error> {
 }
 fn record_job(app: &App, id: String, mut value: Value) {
     value["updated_at"] = json!(Utc::now().to_rfc3339());
-    if let Some(job) = app.jobs.read().unwrap().get(&id) {
+    if let Ok(Some(job)) = app.db.job(&id) {
         for key in ["started_at", "monitor_target"] {
             if let Some(existing) = job.get(key) {
                 value[key] = existing.clone();
             }
         }
     }
-    if let Err(e) = store::job(&id, &value) {
+    if let Err(e) = app.db.put_job(&id, &value) {
         eprintln!("Job persistence failed: {e}");
         value["persistence_error"] = json!(e.to_string());
+        if let Ok(mut failed) = app.persistence_failures.lock() {
+            failed.insert(id);
+        }
     }
-    app.jobs.write().unwrap().insert(id, value);
 }
-fn process_ibp(path: &Path, capture_id: &str) -> anyhow::Result<(Vec<Emission>, Value)> {
+/// Decide how long the capture's raw IQ is kept, then apply the time rules immediately.
+fn retire_capture(app: &App, manifest: &Path, verified: bool) {
+    let (Some(dir), Ok(captures)) = (manifest.parent(), Path::new("data/captures").canonicalize())
+    else {
+        return;
+    };
+    if !dir.canonicalize().is_ok_and(|d| d.starts_with(&captures)) {
+        return; // replays and imported datasets are never retired
+    }
+    if let Err(e) = retention::mark(dir, verified) {
+        eprintln!("Retention marker failed: {e}");
+    }
+    if let Err(e) = retention::sweep(&captures, &app.config.retention, Utc::now()) {
+        eprintln!("IQ retention sweep failed: {e}");
+    }
+}
+fn process_ibp(db: &Db, path: &Path, capture_id: &str) -> anyhow::Result<(Vec<Emission>, Value)> {
     let analysis = ibp::analyze(path)?;
-    analysis.save(Path::new("data/results"), capture_id)?;
+    db.replace_dataset(capture_id, &analysis.emissions)?;
     let summary = analysis.summary(capture_id);
     Ok((analysis.emissions, summary))
 }
@@ -560,15 +568,15 @@ async fn finish(app: App, id: String, path: Result<PathBuf, anyhow::Error>, faul
                 if m.capture_profile.as_deref() == Some(ibp::PROFILE) {
                     let file = p.clone();
                     let capture = m.id.clone();
-                    let result = tokio::task::spawn_blocking(move || process_ibp(&file, &capture))
-                        .await
-                        .map_err(anyhow::Error::from)
-                        .and_then(|v| v);
+                    let db = app.db.clone();
+                    let result =
+                        tokio::task::spawn_blocking(move || process_ibp(&db, &file, &capture))
+                            .await
+                            .map_err(anyhow::Error::from)
+                            .and_then(|v| v);
                     let mut value = match result {
                         Ok((rows, summary)) => {
-                            let mut rs = app.results.write().unwrap();
-                            rs.retain(|e| e.dataset_id != m.id);
-                            rs.extend(rows);
+                            retire_capture(&app, p, rows.iter().any(|e| e.identity.is_some()));
                             summary
                         }
                         Err(err) => {
@@ -587,6 +595,8 @@ async fn finish(app: App, id: String, path: Result<PathBuf, anyhow::Error>, faul
                     return;
                 }
                 if m.mode == "live" && !m.emission_verified {
+                    // Kept for the review window, then expires like verified IQ.
+                    retire_capture(&app, p, true);
                     record_job(
                         &app,
                         id.clone(),
@@ -597,6 +607,7 @@ async fn finish(app: App, id: String, path: Result<PathBuf, anyhow::Error>, faul
             }
         }
     }
+    let manifest = path.as_ref().ok().cloned();
     let result = match path {
         Ok(p) => tokio::task::spawn_blocking(move || pipeline::process(&p, fault.as_deref()))
             .await
@@ -604,15 +615,14 @@ async fn finish(app: App, id: String, path: Result<PathBuf, anyhow::Error>, faul
             .and_then(|r| r),
         Err(e) => Err(e),
     };
+    if let (Some(m), Ok(e)) = (&manifest, &result) {
+        if e.mode == "live" {
+            retire_capture(&app, m, e.detected);
+        }
+    }
     let value = match result {
-        Ok(e) => match pipeline::save(&e, Path::new("data/results")) {
-            Ok(()) => {
-                let eid = e.id.clone();
-                let mut rs = app.results.write().unwrap();
-                rs.retain(|v| v.id != eid);
-                rs.push(e);
-                json!({"id":id,"status":"completed","emission_id":eid})
-            }
+        Ok(e) => match app.db.put_emissions(std::slice::from_ref(&e)) {
+            Ok(()) => json!({"id":id,"status":"completed","emission_id":e.id}),
             Err(err) => {
                 json!({"id":id,"status":"failed","persistence_error":err.to_string(),"error":err.to_string()})
             }
@@ -696,17 +706,15 @@ async fn replay(
             ""
         }
     );
-    if !r.force
-        && app.results.read().unwrap().iter().any(|e| {
-            e.id == eid
-                && r.fault_receiver.as_ref().is_none_or(|id| {
-                    e.receivers.iter().any(|rx| {
-                        &rx.receiver.id == id
-                            && rx.reason.as_deref().is_some_and(|s| s.starts_with("TEST:"))
-                    })
-                })
+    let cached = app.db.emission(&eid).map_err(internal)?.is_some_and(|e| {
+        r.fault_receiver.as_ref().is_none_or(|id| {
+            e.receivers.iter().any(|rx| {
+                &rx.receiver.id == id
+                    && rx.reason.as_deref().is_some_and(|s| s.starts_with("TEST:"))
+            })
         })
-    {
+    });
+    if !r.force && cached {
         return Ok(Json(
             json!({"job_id":format!("cached-{eid}"),"cached":true}),
         ));
@@ -771,17 +779,15 @@ async fn start_capture(
 
 async fn job(State(app): State<App>, ApiPath(id): ApiPath<String>) -> Api<Value> {
     if let Some(eid) = id.strip_prefix("cached-") {
-        if app.results.read().unwrap().iter().any(|e| e.id == eid) {
+        if app.db.emission(eid).map_err(internal)?.is_some() {
             return Ok(Json(
                 json!({"id":id,"status":"completed","emission_id":eid,"cached":true}),
             ));
         }
     }
-    app.jobs
-        .read()
-        .unwrap()
-        .get(&id)
-        .cloned()
+    app.db
+        .job(&id)
+        .map_err(internal)?
         .map(Json)
         .ok_or(Error(StatusCode::NOT_FOUND, "Job not found".into()))
 }
@@ -842,6 +848,36 @@ async fn review(
     Ok(Json(json!({"job_id":id})))
 }
 
+/// Import the former JSON archive once, and refresh bundled replay results on every start.
+fn migrate(db: &Db) -> anyhow::Result<(usize, usize)> {
+    let mut imported = (0, 0);
+    if db.meta("legacy_json_import")?.is_none() {
+        imported = db.import_legacy(Path::new("data/results"), Path::new("data/jobs"))?;
+        db.set_meta("legacy_json_import", &Utc::now().to_rfc3339())?;
+    }
+    let mut replays = vec![];
+    for entry in std::fs::read_dir("data/results")
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        let path = entry.path();
+        if path.extension().is_some_and(|s| s == "json")
+            && !path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .is_some_and(|n| n.starts_with("live-"))
+        {
+            let e: Emission = serde_json::from_slice(&std::fs::read(&path)?)?;
+            if e.mode == "replay" {
+                replays.push(e);
+            }
+        }
+    }
+    db.put_emissions(&replays)?;
+    Ok(imported)
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args: Vec<_> = std::env::args().collect();
@@ -863,7 +899,8 @@ async fn main() -> anyhow::Result<()> {
                 args.get(3).is_none(),
                 "Fault injection is available for replays"
             );
-            let (_, summary) = process_ibp(Path::new(path), &m.id)?;
+            let db = Db::open(Path::new("data/meridian.sqlite"))?;
+            let (_, summary) = process_ibp(&db, Path::new(path), &m.id)?;
             println!("{}", serde_json::to_string_pretty(&summary)?);
             return Ok(());
         }
@@ -889,10 +926,19 @@ async fn main() -> anyhow::Result<()> {
         println!("{}", manifest.display());
         return Ok(());
     }
-    let mut results = vec![];
-    std::fs::create_dir_all("data/results")?;
-    let mut jobs = store::recover_jobs(Path::new("data/jobs"))?;
-    // Recover only a known IBP capture saved before its atomic slot bundle was published.
+    let db = Arc::new(Db::open(Path::new("data/meridian.sqlite"))?);
+    let interrupted = db.interrupt_running()?;
+    if interrupted > 0 {
+        eprintln!("{interrupted} unfinished job(s) marked interrupted");
+    }
+    // Bundled replay results always reflect the shipped files; live JSON is imported once.
+    let (imported, imported_jobs) = migrate(&db)?;
+    if imported + imported_jobs > 0 {
+        eprintln!(
+            "Imported {imported} observation(s) and {imported_jobs} job(s) into data/meridian.sqlite"
+        );
+    }
+    // Recover only a known IBP capture saved before its slot bundle was stored.
     if let Ok(captures) = std::fs::read_dir("data/captures") {
         for entry in captures.flatten() {
             let path = entry.path().join("manifest.json");
@@ -904,59 +950,13 @@ async fn main() -> anyhow::Result<()> {
             };
             if m.capture_profile.as_deref() != Some(ibp::PROFILE)
                 || entry.file_name().to_str() != Some(m.id.as_str())
-                || Path::new("data/results")
-                    .join(format!("{}-slots.json", m.id))
-                    .exists()
+                || db.has_dataset(&m.id)?
             {
                 continue;
             }
-            match process_ibp(&path, &m.id) {
-                Ok((_, summary)) => {
-                    for (id, job) in jobs.iter_mut().filter(|(_, j)| {
-                        j["capture_id"].as_str() == Some(&m.id) && j["status"] == "awaiting_review"
-                    }) {
-                        for (key, value) in summary.as_object().unwrap() {
-                            job[key] = value.clone();
-                        }
-                        job["updated_at"] = json!(Utc::now().to_rfc3339());
-                        store::job(id, job)?;
-                    }
-                }
-                Err(err) => eprintln!("Could not process IBP capture {}: {err}", m.id),
+            if let Err(err) = process_ibp(&db, &path, &m.id) {
+                eprintln!("Could not process IBP capture {}: {err}", m.id);
             }
-        }
-    }
-    for entry in std::fs::read_dir("data/results")? {
-        let path = entry?.path();
-        if path.extension().is_some_and(|s| s == "json") {
-            if path
-                .file_name()
-                .and_then(|s| s.to_str())
-                .is_some_and(|n| n.ends_with("-slots.json"))
-            {
-                results.extend(serde_json::from_slice::<Vec<Emission>>(&std::fs::read(
-                    path,
-                )?)?);
-                continue;
-            }
-            let mut e: Emission = serde_json::from_slice(&std::fs::read(path)?)?;
-            let needs_reference = e.reference.as_ref().is_none_or(|r| {
-                r.three_receivers
-                    .as_ref()
-                    .is_some_and(|c| c.selection.is_empty())
-            });
-            if needs_reference
-                && e.id
-                    .strip_prefix("live-")
-                    .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok())
-            {
-                if let Some(reference) =
-                    protocol::reference_view(&e, &Path::new("data/captures").join(&e.id))
-                {
-                    e.reference = Some(reference);
-                }
-            }
-            results.push(e);
         }
     }
     let mut datasets = vec![];
@@ -978,8 +978,8 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|_| config.listen.clone());
     let app = App {
         config: Arc::new(config),
-        results: Arc::new(RwLock::new(results)),
-        jobs: Arc::new(RwLock::new(jobs)),
+        db,
+        persistence_failures: Arc::new(Mutex::new(HashSet::new())),
         busy: Arc::new(AtomicBool::new(false)),
         datasets: Arc::new(datasets),
         token: Arc::new(
@@ -1020,6 +1020,35 @@ async fn main() -> anyhow::Result<()> {
             }
         });
     }
+    let retention_app = app.clone();
+    tokio::spawn(async move {
+        loop {
+            if retention_app.stopping.load(Ordering::SeqCst) {
+                break;
+            }
+            let policy = retention_app.config.retention.clone();
+            let db = retention_app.db.clone();
+            let outcome = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+                let iq = retention::sweep(Path::new("data/captures"), &policy, Utc::now())?;
+                let rows = db.prune(&policy, Utc::now().timestamp_millis())?;
+                Ok((iq, rows))
+            })
+            .await;
+            match outcome {
+                Ok(Ok((iq, (results, jobs))))
+                    if iq.iq_files_deleted + iq.capture_dirs_deleted + results + jobs > 0 =>
+                {
+                    eprintln!(
+                        "Retention: {} IQ file(s), {} byte(s), {} capture dir(s), {results} result(s), {jobs} job(s) removed",
+                        iq.iq_files_deleted, iq.iq_bytes_deleted, iq.capture_dirs_deleted
+                    )
+                }
+                Ok(Err(e)) => eprintln!("Retention failed: {e}"),
+                _ => {}
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+        }
+    });
     let shutdown_app = app.clone();
     let monitor_target = monitor::configured_targets(&app.config)?;
     let router = Router::new()

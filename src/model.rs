@@ -197,6 +197,8 @@ pub struct Config {
     pub targets: Vec<Target>,
     #[serde(default)]
     pub monitor: Option<MonitorConfig>,
+    #[serde(default)]
+    pub retention: crate::retention::Policy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
