@@ -264,6 +264,18 @@ impl Directory {
         limit: usize,
         reserved: &std::collections::HashSet<String>,
     ) -> Result<Vec<crate::model::LiveSource>> {
+        self.network_spaced(center, round, limit, reserved, 150.)
+    }
+    /// Anchor plus the nearest eligible receivers at least `spacing_km` from every chosen one,
+    /// relaxing to half and then no spacing only if the directory has too few.
+    pub fn network_spaced(
+        &self,
+        center: f64,
+        round: usize,
+        limit: usize,
+        reserved: &std::collections::HashSet<String>,
+        spacing_km: f64,
+    ) -> Result<Vec<crate::model::LiveSource>> {
         use crate::{geo, model::Point};
         let order = self.anchor_order(center, reserved)?;
         let point = |r: &Entry| {
@@ -277,7 +289,7 @@ impl Directory {
             geo::distance(point(a), anchor).total_cmp(&geo::distance(point(b), anchor))
         });
         let mut chosen = vec![first];
-        for spacing in [150.0, 0.0] {
+        for spacing in [spacing_km, spacing_km / 2., 0.0] {
             for &r in &candidates {
                 if chosen.len() >= limit {
                     break;

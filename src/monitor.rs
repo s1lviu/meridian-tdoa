@@ -29,8 +29,9 @@ pub(super) fn configured_targets(config: &Config) -> Result<Option<(MonitorConfi
         "A monitor needs live capture and an interval of 60–86400 seconds"
     );
     ensure!(
-        settings.directory_receivers == 0 || (3..=8).contains(&settings.directory_receivers),
-        "A directory network needs 3–8 receivers per capture"
+        settings.directory_receivers == 0
+            || (3..=meridian_tdoa::pipeline::MAX_RECEIVERS).contains(&settings.directory_receivers),
+        "A directory network needs 3–12 receivers per capture"
     );
     let mut targets = vec![];
     for id in std::iter::once(&settings.target_id).chain(&settings.additional_target_ids) {
@@ -51,6 +52,7 @@ pub(super) fn configured_targets(config: &Config) -> Result<Option<(MonitorConfi
             Some(meridian_tdoa::ft8_tdoa::PROFILE) => {
                 t.kind == "amateur_digital" && meridian_tdoa::bands::name(t.frequency_hz).is_some()
             }
+            Some(meridian_tdoa::channel::PROFILE) => t.kind == "monitored_channel",
             _ => false,
         };
         ensure!(valid, "No automatic RF verifier for monitor target {id}");
@@ -88,11 +90,16 @@ fn plan_bands(
     rounds: &mut [usize],
     limit: usize,
     excluded: &HashSet<String>,
+    per_target: &std::collections::HashMap<String, HashSet<String>>,
 ) -> Vec<Result<(Config, Target)>> {
     let dynamic = |t: &Target| {
         limit > 0
-            && [Some(ibp::PROFILE), Some(meridian_tdoa::ft8_tdoa::PROFILE)]
-                .contains(&t.verification.as_deref())
+            && [
+                Some(ibp::PROFILE),
+                Some(meridian_tdoa::ft8_tdoa::PROFILE),
+                Some(meridian_tdoa::channel::PROFILE),
+            ]
+            .contains(&t.verification.as_deref())
     };
     // Fixed receivers (e.g. LF) get their frequency before the worldwide pool is allocated.
     let mut reserved: HashSet<_> = bands
@@ -119,9 +126,17 @@ fn plan_bands(
             if dynamic(&t) {
                 let round = rounds[i];
                 rounds[i] += 1;
+                let mut avoid = reserved.clone();
+                avoid.extend(per_target.get(&t.id).into_iter().flatten().cloned());
                 cfg.sources = directory
                     .ok_or_else(|| anyhow::anyhow!("Receiver directory unavailable"))?
-                    .network_excluding(capture::iq_center(&t), round, limit, &reserved)?;
+                    .network_spaced(
+                        capture::iq_center(&t),
+                        round,
+                        limit,
+                        &avoid,
+                        t.min_spacing_km.unwrap_or(150.),
+                    )?;
                 t.source_ids = cfg.sources.iter().map(|s| s.id.clone()).collect();
             }
             let sources = capture::authorize(&cfg, &t)?;
@@ -261,6 +276,19 @@ pub(super) async fn run(app: App, settings: MonitorConfig, targets: Vec<Target>)
             last_jobs: ids.clone(),
             notice: None,
         };
+        // Listen-then-measure: receivers that heard nothing on a band recently are skipped there.
+        let per_target: std::collections::HashMap<String, HashSet<String>> = bands
+            .iter()
+            .filter_map(|&i| {
+                let key = super::channel_key(targets[i].frequency_hz);
+                Some((
+                    targets[i].id.clone(),
+                    app.db
+                        .deaf_receivers(&key, Utc::now().timestamp_millis())
+                        .ok()?,
+                ))
+            })
+            .collect();
         let plans = plan_bands(
             &app.config,
             app.directory.read().unwrap().as_ref(),
@@ -269,6 +297,7 @@ pub(super) async fn run(app: App, settings: MonitorConfig, targets: Vec<Target>)
             &mut rounds,
             settings.directory_receivers,
             &excluded,
+            &per_target,
         );
         let mut ready = Vec::new();
         let mut work_ids = Vec::new();
@@ -388,6 +417,7 @@ mod tests {
             &mut rounds,
             settings.directory_receivers,
             &none,
+            &Default::default(),
         )
         .into_iter()
         .collect::<Result<Vec<_>>>()
@@ -398,7 +428,7 @@ mod tests {
             .collect();
         assert_eq!(
             ids.len(),
-            16,
+            2 * settings.directory_receivers,
             "two bands, eight receivers each, no receiver twice"
         );
         let tmp = tempfile::tempdir().unwrap();
@@ -420,6 +450,7 @@ mod tests {
             &mut rounds,
             settings.directory_receivers,
             &excluded,
+            &Default::default(),
         )
         .into_iter()
         .collect::<Result<Vec<_>>>()
@@ -439,6 +470,7 @@ mod tests {
             &mut rounds,
             settings.directory_receivers,
             &none,
+            &Default::default(),
         )
         .into_iter()
         .collect::<Result<Vec<_>>>()

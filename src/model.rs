@@ -194,6 +194,10 @@ pub struct Target {
     pub eligibility_evidence: Evidence,
     pub source_ids: Vec<String>,
     pub duration_s: u64,
+    /// Minimum distance between receivers picked from the directory. Baselines must be long
+    /// compared with c·σ(timing): ~150 km suffices for LF ground wave, HF needs several hundred.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_spacing_km: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

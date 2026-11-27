@@ -266,6 +266,18 @@ pub fn locate_with_speed(
     pairs: &[Pair],
     speed_km_s: f64,
 ) -> Result<Vec<Estimate>> {
+    locate_bounded(rx, pairs, speed_km_s, MAX_REGION_KM)
+}
+
+/// Largest 95% region radius reported as a position; beyond it the result is undetermined.
+pub const MAX_REGION_KM: f64 = 4000.;
+
+pub fn locate_bounded(
+    rx: &[RxResult],
+    pairs: &[Pair],
+    speed_km_s: f64,
+    max_region_km: f64,
+) -> Result<Vec<Estimate>> {
     let used: Vec<_> = rx.iter().filter(|r| r.used).collect();
     ensure!(
         used.len() >= 3,
@@ -368,10 +380,10 @@ pub fn locate_with_speed(
             let az = 5. * i as f64;
             let inside = |r: f64| fine(destination(center, az, r)) - score < threshold;
             let mut hi = 0.5;
-            while inside(hi) && hi < 4000. {
+            while inside(hi) && hi < max_region_km {
                 hi *= 1.6;
             }
-            ensure!(hi < 4000., "Unbounded uncertainty region");
+            ensure!(hi < max_region_km, "Unbounded uncertainty region");
             let mut lo = 0.;
             for _ in 0..30 {
                 let mid = (lo + hi) / 2.;

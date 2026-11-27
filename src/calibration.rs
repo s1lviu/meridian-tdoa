@@ -225,3 +225,70 @@ pub fn formulations(emissions: &[Emission], truth: Point) -> serde_json::Value {
         .collect::<serde_json::Map<_, _>>()
         .into()
 }
+
+/// Centre and half-diagonal (km) of a four-character Maidenhead square (2° × 1°).
+pub fn grid4(g: &str) -> Option<(Point, f64)> {
+    let b = g.as_bytes();
+    if b.len() != 4
+        || !(b'A'..=b'R').contains(&b[0])
+        || !(b'A'..=b'R').contains(&b[1])
+        || !b[2].is_ascii_digit()
+        || !b[3].is_ascii_digit()
+    {
+        return None;
+    }
+    let lon = -180. + 20. * (b[0] - b'A') as f64 + 2. * (b[2] - b'0') as f64 + 1.;
+    let lat = -90. + 10. * (b[1] - b'A') as f64 + (b[3] - b'0') as f64 + 0.5;
+    let c = Point { lat, lon };
+    let half = [(0.5, 1.), (-0.5, 1.)]
+        .iter()
+        .map(|(dl, dn)| {
+            geo::distance(
+                c,
+                Point {
+                    lat: lat + dl,
+                    lon: lon + dn,
+                },
+            )
+        })
+        .fold(0., f64::max);
+    Some((c, half))
+}
+
+/// Post-hoc FT8 evaluation: every observation timed at ≥4 receivers whose message carried a
+/// locator, re-solved without the region cap so the actual uncertainty is visible.
+pub fn ft8(emissions: &[Emission]) -> serde_json::Value {
+    let mut rows = vec![];
+    for e in emissions {
+        let Some(ev) = e.reference.as_ref().and_then(|r| r.ft8.as_ref()) else {
+            continue;
+        };
+        let Some((truth, half)) = ev.grid.as_deref().and_then(grid4) else {
+            continue;
+        };
+        let mut rx = e.receivers.clone();
+        for r in &mut rx {
+            r.used = r.confirmed;
+        }
+        if rx.iter().filter(|r| r.used).count() < 4 {
+            continue;
+        }
+        let row = match geo::locate_bounded(&rx, &e.pairs, geo::C_KM_S, 20_000.) {
+            Ok(s) => {
+                let best = s
+                    .iter()
+                    .min_by(|a, b| a.chi2.unwrap_or(0.).total_cmp(&b.chi2.unwrap_or(0.)))
+                    .unwrap();
+                serde_json::json!({"message":ev.message,"grid":ev.grid,"receivers":rx.iter().filter(|r|r.used).count(),
+                    "solutions":s.len(),"error_km":geo::distance(best.center, truth),"grid_half_diagonal_km":half,
+                    "radius_km":best.radius_km,"scale":best.scale,"pair_residual_us":best.residual_us,
+                    "contains_grid_centre":contains(&best.polygon, truth),"stored_status":e.status})
+            }
+            Err(err) => {
+                serde_json::json!({"message":ev.message,"grid":ev.grid,"failure":err.to_string()})
+            }
+        };
+        rows.push(row);
+    }
+    serde_json::Value::Array(rows)
+}

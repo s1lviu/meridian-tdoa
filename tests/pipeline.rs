@@ -139,6 +139,7 @@ fn fourth_independent_receiver_can_remove_global_mirror_in_a_synthetic_geometry_
 fn no_permissions_means_no_network_capture() {
     let c: Config = serde_json::from_slice(&fs::read("config/app.json").unwrap()).unwrap();
     let t = Target {
+        min_spacing_km: None,
         verification: None,
         id: "test".into(),
         kind: "public_beacon".into(),

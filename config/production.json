@@ -6,12 +6,14 @@
     "additional_target_ids": [
       "ft8-20m",
       "ft8-40m",
+      "msf-channel",
       "ft8-30m",
+      "dcf77-channel",
       "ft8-17m",
       "ft8-15m"
     ],
     "interval_s": 60,
-    "directory_receivers": 8,
+    "directory_receivers": 12,
     "parallel_bands": 2
   },
   "kiwirecorder_path": "vendor/kiwiclient/kiwirecorder.py",
@@ -328,7 +330,8 @@
         "0cb2b7d6cd86"
       ],
       "duration_s": 30,
-      "verification": "ft8_v1"
+      "verification": "ft8_v1",
+      "min_spacing_km": 600
     },
     {
       "id": "ft8-30m",
@@ -346,7 +349,8 @@
         "0cb2b7d6cd86"
       ],
       "duration_s": 30,
-      "verification": "ft8_v1"
+      "verification": "ft8_v1",
+      "min_spacing_km": 600
     },
     {
       "id": "ft8-20m",
@@ -364,7 +368,8 @@
         "0cb2b7d6cd86"
       ],
       "duration_s": 30,
-      "verification": "ft8_v1"
+      "verification": "ft8_v1",
+      "min_spacing_km": 600
     },
     {
       "id": "ft8-17m",
@@ -382,7 +387,8 @@
         "0cb2b7d6cd86"
       ],
       "duration_s": 30,
-      "verification": "ft8_v1"
+      "verification": "ft8_v1",
+      "min_spacing_km": 600
     },
     {
       "id": "ft8-15m",
@@ -400,7 +406,46 @@
         "0cb2b7d6cd86"
       ],
       "duration_s": 30,
-      "verification": "ft8_v1"
+      "verification": "ft8_v1",
+      "min_spacing_km": 600
+    },
+    {
+      "id": "msf-channel",
+      "kind": "monitored_channel",
+      "frequency_hz": 60000,
+      "eligibility_evidence": {
+        "url": "https://www.npl.co.uk/products-services/time-frequency/msf-radio-time-signal",
+        "note": "NPL: the MSF time signal operates on 60 kHz from Anthorn Radio Station. Monitored as an unknown-emitter channel; nothing about the transmitter is a solver input."
+      },
+      "source_ids": [
+        "f82e0c018380",
+        "00aafd2d3947",
+        "147f0fdf7a94",
+        "f82e0c136d0e",
+        "0cb2b7d6cd86"
+      ],
+      "duration_s": 30,
+      "verification": "correlated_v1",
+      "min_spacing_km": 150
+    },
+    {
+      "id": "dcf77-channel",
+      "kind": "monitored_channel",
+      "frequency_hz": 77500,
+      "eligibility_evidence": {
+        "url": "https://www.ptb.de/cms/en/ptb/fachabteilungen/abt4/fb-44/ag-442/dissemination-of-legal-time/dcf77.html",
+        "note": "PTB DCF77 77.5 kHz. The same channel as the PRN-verified target, here analysed without any DCF77-specific knowledge as a cross-check of the unknown-emitter pipeline."
+      },
+      "source_ids": [
+        "f82e0c018380",
+        "00aafd2d3947",
+        "147f0fdf7a94",
+        "f82e0c136d0e",
+        "0cb2b7d6cd86"
+      ],
+      "duration_s": 30,
+      "verification": "correlated_v1",
+      "min_spacing_km": 150
     }
   ],
   "gps_offset_valid_until_utc": "2027-01-01T00:00:00Z"

@@ -65,6 +65,8 @@ pub struct Analysis {
     pub captured_receivers: usize,
     pub sampled_slots: usize,
     pub decodes: usize,
+    /// Messages decoded by each synchronized receiver over all covered slots.
+    pub receiver_decodes: Vec<(String, usize)>,
 }
 
 impl Analysis {
@@ -192,10 +194,10 @@ pub fn analyze(path: &Path) -> Result<Analysis> {
         ensure!(
             file.starts_with(&root)
                 && total <= 64 * 1024 * 1024
-                && pipeline::checksum(&file)? == r.sha256,
+                && pipeline::checksum(&crate::iq::hashed_file(&file))? == r.sha256,
             "Invalid IQ path, size or hash"
         );
-        let iq = match kiwi::read(&file) {
+        let iq = match crate::iq::read(&file, &m) {
             Ok(iq) => iq,
             Err(err) => {
                 excluded.push(serde_json::json!({"id":r.id,"reason":err.to_string()}));
@@ -226,6 +228,8 @@ pub fn analyze(path: &Path) -> Result<Analysis> {
         .fold(f64::NEG_INFINITY, f64::max);
     let mut emissions = vec![];
     let mut evidence_log = vec![];
+    let mut per_receiver: BTreeMap<String, usize> =
+        streams.iter().map(|s| (s.receiver.id.clone(), 0)).collect();
     let (mut sampled, mut decodes) = (0, 0);
     let mut planner = FftPlanner::new();
     if start.is_finite() && end - start <= 180. {
@@ -243,6 +247,7 @@ pub fn analyze(path: &Path) -> Result<Analysis> {
                 let spec = spectrum(&mut planner, &iq);
                 let found = ft8::decode(&usb_audio(&mut planner, &spec), FS as u32);
                 decodes += found.len();
+                *per_receiver.entry(s.receiver.id.clone()).or_default() += found.len();
                 covered.push((s, spec, found));
             }
             if covered.is_empty() {
@@ -436,6 +441,7 @@ pub fn analyze(path: &Path) -> Result<Analysis> {
         captured_receivers: m.receivers.len(),
         sampled_slots: sampled,
         decodes,
+        receiver_decodes: per_receiver.into_iter().collect(),
     })
 }
 

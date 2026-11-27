@@ -2,7 +2,9 @@
 //! PTB-Mitteilungen 114 (2004), pp. 353–354, Fig. 8: 9-stage LFSR, taps 5/9,
 //! zero initial state with a start pulse, 512 chips, chip rate 77500/120 Hz.
 //! Matching this code never supplies a delay, position or search region to TDoA.
-use crate::{dsp, kiwi, model::*, pipeline, store};
+#[cfg(test)]
+use crate::kiwi;
+use crate::{dsp, model::*, pipeline, store};
 use anyhow::{Result, ensure};
 use rustfft::{FftPlanner, num_complex::Complex};
 use serde::{Deserialize, Serialize};
@@ -89,8 +91,11 @@ pub fn verify(manifest_path: &Path) -> Result<Vec<Match>> {
             file.starts_with(&root) && std::fs::metadata(&file)?.len() <= 64 * 1024 * 1024,
             "Invalid file"
         );
-        ensure!(pipeline::checksum(&file)? == r.sha256, "Checksum invalid");
-        let t = kiwi::read(&file)?;
+        ensure!(
+            pipeline::checksum(&crate::iq::hashed_file(&file))? == r.sha256,
+            "Checksum invalid"
+        );
+        let t = crate::iq::read(&file, &m)?;
         let n = (((t.end() - t.start()).max(0.).min(60.)) * FS as f64) as usize;
         let scores = match_samples(&t.resample(t.start(), FS as f64, n));
         let accepted = scores.iter().filter(|v| **v >= 0.65).count();

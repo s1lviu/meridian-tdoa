@@ -1,8 +1,11 @@
-use crate::{dsp, geo, kiwi, model::*};
+use crate::{dsp, geo, model::*};
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, Datelike, Duration, Utc};
 use sha2::{Digest, Sha256};
 use std::{collections::HashSet, fs, path::Path};
+
+/// Receivers per capture. The fully-correlated subset search is exhaustive (2^n subsets).
+pub const MAX_RECEIVERS: usize = 12;
 
 pub fn checksum(path: &Path) -> Result<String> {
     Ok(format!("{:x}", Sha256::digest(fs::read(path)?)))
@@ -46,7 +49,7 @@ pub fn validate_manifest(m: &Manifest) -> Result<()> {
                 && m.kind == "amateur_digital"));
     let minimum_receivers = if single_receiver_ok { 1 } else { 3 };
     ensure!(
-        (minimum_receivers..=8).contains(&m.receivers.len()),
+        (minimum_receivers..=MAX_RECEIVERS).contains(&m.receivers.len()),
         "Invalid receiver count for this capture profile"
     );
     ensure!(valid_evidence(&m.provenance), "Missing provenance");
@@ -124,8 +127,12 @@ pub fn process(manifest_path: &Path, fault_receiver: Option<&str>) -> Result<Emi
             fs::metadata(&p)?.len() <= 64 * 1024 * 1024,
             "IQ file too large"
         );
-        ensure!(checksum(&p)? == r.sha256, "SHA-256 mismatch: {}", r.id);
-        let mut t = kiwi::read(&p)?;
+        ensure!(
+            checksum(&crate::iq::hashed_file(&p))? == r.sha256,
+            "SHA-256 mismatch: {}",
+            r.id
+        );
+        let mut t = crate::iq::read(&p, &m)?;
         if Some(r.id.as_str()) == fault_receiver {
             t.max_age = 255;
             t.sync_error = Some("TEST: injected GNSS loss; RF samples are unchanged".into());

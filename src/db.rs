@@ -79,7 +79,19 @@ impl Db {
                 id TEXT NOT NULL,
                 start_ms INTEGER NOT NULL,
                 seconds REAL NOT NULL);
-             CREATE INDEX IF NOT EXISTS receiver_usage_id ON receiver_usage(id, start_ms);",
+             CREATE INDEX IF NOT EXISTS receiver_usage_id ON receiver_usage(id, start_ms);
+             CREATE TABLE IF NOT EXISTS receiver_decodes (
+                id TEXT NOT NULL,
+                band TEXT NOT NULL,
+                at_ms INTEGER NOT NULL,
+                decodes INTEGER NOT NULL);
+             CREATE INDEX IF NOT EXISTS receiver_decodes_id ON receiver_decodes(band, at_ms);
+             CREATE TABLE IF NOT EXISTS tracks (
+                key TEXT PRIMARY KEY,
+                last_ms INTEGER NOT NULL,
+                band TEXT,
+                body TEXT NOT NULL);
+             CREATE INDEX IF NOT EXISTS tracks_last ON tracks(last_ms);",
         )?;
         Ok(Db(Mutex::new(conn)))
     }
@@ -116,6 +128,8 @@ impl Db {
             Self::insert(&tx, e)?;
         }
         tx.commit()?;
+        drop(conn);
+        self.fold_tracks(es)?;
         Ok(())
     }
 
@@ -128,6 +142,8 @@ impl Db {
             Self::insert(&tx, e)?;
         }
         tx.commit()?;
+        drop(conn);
+        self.fold_tracks(es)?;
         Ok(())
     }
 
@@ -162,6 +178,54 @@ impl Db {
             |r| r.get::<_, String>(0),
         )?;
         rows.map(|b| Ok(serde_json::from_str(&b?)?)).collect()
+    }
+
+    pub fn track(&self, key: &str) -> Result<Option<crate::tracks::Track>> {
+        let conn = self.0.lock().unwrap();
+        let body: Option<String> = conn
+            .query_row("SELECT body FROM tracks WHERE key=?1", [key], |r| r.get(0))
+            .optional()?;
+        body.map(|b| serde_json::from_str(&b).map_err(Into::into))
+            .transpose()
+    }
+
+    /// Tracks updated since `since_ms`, most recent first.
+    pub fn tracks(&self, since_ms: i64, limit: usize) -> Result<Vec<crate::tracks::Track>> {
+        let conn = self.0.lock().unwrap();
+        let mut stmt = conn.prepare_cached(
+            "SELECT body FROM tracks WHERE last_ms>=?1 ORDER BY last_ms DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![since_ms, limit as i64], |r| r.get::<_, String>(0))?;
+        rows.map(|b| Ok(serde_json::from_str(&b?)?)).collect()
+    }
+
+    /// Fold live observations into the emitter registry, oldest first.
+    pub fn fold_tracks(&self, emissions: &[Emission]) -> Result<usize> {
+        let mut live: Vec<&Emission> = emissions
+            .iter()
+            .filter(|e| e.mode == "live" && !e.fault_injected && e.detected)
+            .collect();
+        live.sort_by(|a, b| a.start_utc.cmp(&b.start_utc));
+        let mut changed = 0;
+        for e in live {
+            let key = crate::tracks::key(e);
+            let mut track = self.track(&key)?;
+            if crate::tracks::update(&mut track, e) {
+                let t = track.unwrap();
+                let conn = self.0.lock().unwrap();
+                conn.execute(
+                    "INSERT OR REPLACE INTO tracks (key,last_ms,band,body) VALUES (?1,?2,?3,?4)",
+                    params![
+                        t.key,
+                        millis(&t.last_utc).unwrap_or(0),
+                        t.band,
+                        serde_json::to_string(&t)?
+                    ],
+                )?;
+                changed += 1;
+            }
+        }
+        Ok(changed)
     }
 
     pub fn has_dataset(&self, dataset_id: &str) -> Result<bool> {
@@ -275,6 +339,41 @@ impl Db {
                 eprintln!("Receiver accounting failed for {}: {e}", o.id);
             }
         }
+    }
+
+    /// Per-receiver decode counts of one FT8 capture (listen-then-measure evidence).
+    pub fn record_decodes(
+        &self,
+        band: &str,
+        counts: &[(String, usize)],
+        now_ms: i64,
+    ) -> Result<()> {
+        let conn = self.0.lock().unwrap();
+        for (id, n) in counts {
+            conn.execute(
+                "INSERT INTO receiver_decodes (id,band,at_ms,decodes) VALUES (?1,?2,?3,?4)",
+                params![id, band, now_ms, *n as i64],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Receivers that heard nothing on channel `band` in at least two captures of the last six hours.
+    pub fn deaf_receivers(
+        &self,
+        band: &str,
+        now_ms: i64,
+    ) -> Result<std::collections::HashSet<String>> {
+        let conn = self.0.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id FROM receiver_decodes WHERE band=?1 AND at_ms>?2 GROUP BY id HAVING COUNT(*)>=2 AND SUM(decodes)=0",
+        )?;
+        let ids = stmt
+            .query_map(params![band, now_ms - 6 * 3_600_000], |r| {
+                r.get::<_, String>(0)
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(ids)
     }
 
     pub fn receiver_health(&self) -> Result<Vec<Value>> {

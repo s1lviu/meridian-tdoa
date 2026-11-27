@@ -337,6 +337,79 @@ async fn emissions(State(app): State<App>, Query(q): Query<Filters>) -> Api<Valu
         json!({"emissions":visible,"unlocated":unlocated,"history":history,"signals":signals,"band_stats":band_stats,"observatory":monitor::snapshot(&app),"monitoring":{"status":monitoring,"segments":segments,"gaps":gaps,"scope":"Only the sampled channels, receivers and times."},"total_matching":selected.iter().filter(|e|e.detected).count()}),
     ))
 }
+#[derive(Default, Deserialize)]
+struct TrackQuery {
+    since: Option<String>,
+    band: Option<String>,
+    bbox: Option<String>,
+}
+/// Emitter registry: one entry per transmitter with its fused position and 95% ellipse.
+async fn tracks(State(app): State<App>, Query(q): Query<TrackQuery>) -> Api<Value> {
+    let since = match q.since.as_deref() {
+        Some(s) => DateTime::parse_from_rfc3339(s)
+            .map_err(bad)?
+            .timestamp_millis(),
+        None => Utc::now().timestamp_millis() - 24 * 3_600_000,
+    };
+    let bbox = match q.bbox {
+        Some(raw) => {
+            let a = raw
+                .split(',')
+                .map(|s| s.parse::<f64>().map_err(bad))
+                .collect::<Result<Vec<_>, _>>()?;
+            if a.len() != 4 {
+                return Err(bad("bbox must be west,south,east,north"));
+            }
+            Some([a[0], a[1], a[2], a[3]])
+        }
+        None => None,
+    };
+    let rows: Vec<Value> = app
+        .db
+        .tracks(since, 5000)
+        .map_err(internal)?
+        .into_iter()
+        .filter(|t| q.band.as_deref().is_none_or(|b| b == "all" || t.band.as_deref() == Some(b)))
+        .filter(|t| {
+            bbox.is_none_or(|[w, s, e, n]| {
+                let lon_ok = if w <= e { t.center.lon >= w && t.center.lon <= e } else { t.center.lon >= w || t.center.lon <= e };
+                lon_ok && t.center.lat >= s && t.center.lat <= n
+            })
+        })
+        .map(|t| {
+            let (major, minor, azimuth) = t.ellipse_95();
+            json!({"track":t,"ellipse_95":{"major_km":major,"minor_km":minor,"azimuth_deg":azimuth}})
+        })
+        .collect();
+    Ok(Json(
+        json!({"since":DateTime::from_timestamp_millis(since),"tracks":rows,
+        "method":"Covariance intersection of successive fixes of the same transmitter; fixes outside the 99.9% gate are counted as rejected."}),
+    ))
+}
+async fn track_detail(State(app): State<App>, ApiPath(key): ApiPath<String>) -> Api<Value> {
+    let t = app
+        .db
+        .track(&key)
+        .map_err(internal)?
+        .ok_or(Error(StatusCode::NOT_FOUND, "Track not found".into()))?;
+    let observations: Vec<Value> = t
+        .observations
+        .iter()
+        .filter_map(|id| app.db.emission(id).ok().flatten())
+        .map(|e| json!({"id":e.id,"start_utc":e.start_utc,"status":e.status,"estimate":e.estimate,"hypotheses":e.hypotheses,
+            "confirmed":e.receivers.iter().filter(|r|r.confirmed).count()}))
+        .collect();
+    let (major, minor, azimuth) = t.ellipse_95();
+    Ok(Json(
+        json!({"track":t,"ellipse_95":{"major_km":major,"minor_km":minor,"azimuth_deg":azimuth},"observations":observations}),
+    ))
+}
+async fn receiver_health(State(app): State<App>) -> Api<Value> {
+    Ok(Json(
+        json!({"policy":app.config.receivers,"receivers":app.db.receiver_health().map_err(internal)?,
+        "leased":app.leases.lock().unwrap().iter().cloned().collect::<Vec<_>>()}),
+    ))
+}
 async fn detail(State(app): State<App>, ApiPath(id): ApiPath<String>) -> Api<Emission> {
     app.db
         .emission(&id)
@@ -548,18 +621,63 @@ fn retire_capture(app: &App, manifest: &Path, verified: bool) {
         eprintln!("IQ retention sweep failed: {e}");
     }
 }
+/// Key of the per-receiver "heard anything here" evidence: the channel frequency.
+pub(crate) fn channel_key(frequency_hz: f64) -> String {
+    format!("{frequency_hz:.0}")
+}
 /// Captures analysed slot by slot (one observation per transmission) rather than as one emission.
 fn slot_profile(m: &Manifest) -> bool {
     matches!(
         m.capture_profile.as_deref(),
-        Some(ibp::PROFILE) | Some(ft8_tdoa::PROFILE)
+        Some(ibp::PROFILE) | Some(ft8_tdoa::PROFILE) | Some(meridian_tdoa::channel::PROFILE)
     )
 }
 fn process_ibp(db: &Db, path: &Path, capture_id: &str) -> anyhow::Result<(Vec<Emission>, Value)> {
     let m: Manifest = serde_json::from_slice(&std::fs::read(path)?)?;
     let (emissions, summary) = if m.capture_profile.as_deref() == Some(ft8_tdoa::PROFILE) {
         let a = ft8_tdoa::analyze(path)?;
+        if a.sampled_slots > 0 {
+            db.record_decodes(
+                &channel_key(m.frequency_hz),
+                &a.receiver_decodes,
+                Utc::now().timestamp_millis(),
+            )?;
+        }
         let s = a.summary(capture_id);
+        (a.emissions, s)
+    } else if m.capture_profile.as_deref() == Some(meridian_tdoa::channel::PROFILE) {
+        let a = meridian_tdoa::channel::analyze(path)?;
+        // Listen-then-measure evidence: how many sub-band emissions each receiver confirmed.
+        let counts: Vec<(String, usize)> = m
+            .receivers
+            .iter()
+            .map(|r| {
+                let n = a
+                    .emissions
+                    .iter()
+                    .filter(|e| {
+                        e.receivers
+                            .iter()
+                            .any(|x| x.receiver.id == r.id && x.confirmed)
+                    })
+                    .count();
+                (r.id.clone(), n)
+            })
+            .collect();
+        db.record_decodes(
+            &channel_key(m.frequency_hz),
+            &counts,
+            Utc::now().timestamp_millis(),
+        )?;
+        let ids: Vec<_> = a
+            .emissions
+            .iter()
+            .filter(|e| e.detected)
+            .map(|e| e.id.clone())
+            .collect();
+        let located = a.emissions.iter().filter(|e| e.estimate.is_some()).count();
+        let s = json!({"status":"completed","capture_id":capture_id,"profile":meridian_tdoa::channel::PROFILE,
+            "segments":a.segments.len(),"detected":ids.len(),"located":located,"emission_id":ids.first(),"emission_ids":ids});
         (a.emissions, s)
     } else {
         let a = ibp::analyze(path)?;
@@ -767,8 +885,8 @@ async fn start_capture(
         .ok_or(bad("Target not configured"))?;
     let mut config = (*app.config).clone();
     if let Some(ids) = r.source_ids {
-        if !(3..=8).contains(&ids.len()) {
-            return Err(bad("Select 3–8 independent receivers"));
+        if !(3..=pipeline::MAX_RECEIVERS).contains(&ids.len()) {
+            return Err(bad("Select 3–12 independent receivers"));
         }
         let guard = app.directory.read().unwrap();
         let d = guard.as_ref().ok_or(bad("Directory unavailable"))?;
@@ -921,6 +1039,24 @@ async fn main() -> anyhow::Result<()> {
         );
         return Ok(());
     }
+    if args.get(1).is_some_and(|v| v == "calibrate") && args.get(2).is_some_and(|v| v == "ft8") {
+        // Post-hoc only: FT8 observations against the locator each station sent.
+        let db = Db::open(Path::new("data/meridian.sqlite"))?;
+        let rows = db.emissions(&db::Query {
+            mode: "live".into(),
+            fault: false,
+            low_hz: 1e6,
+            high_hz: 60e6,
+            start_ms: 0,
+            end_ms: i64::MAX,
+            limit: 1_000_000,
+        })?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&meridian_tdoa::calibration::ft8(&rows))?
+        );
+        return Ok(());
+    }
     if args.get(1).is_some_and(|v| v == "calibrate") {
         // Post-hoc only: residuals of stored live DCF77 delays at the published PTB position.
         let db = Db::open(Path::new("data/meridian.sqlite"))?;
@@ -1014,11 +1150,16 @@ async fn main() -> anyhow::Result<()> {
             let d = directory::load(Path::new("data/state/directory.json"))?;
             let n: usize = n.parse()?;
             let center = capture::iq_center(&target);
-            let excluded = Db::open(Path::new("data/meridian.sqlite"))?.unusable_receivers(
+            let db = Db::open(Path::new("data/meridian.sqlite"))?;
+            let mut excluded = db.unusable_receivers(
                 Utc::now().timestamp_millis(),
                 &cfg.receivers,
                 target.duration_s as f64,
             )?;
+            excluded.extend(db.deaf_receivers(
+                &channel_key(target.frequency_hz),
+                Utc::now().timestamp_millis(),
+            )?);
             let round = match flag("--near") {
                 Some(p) => {
                     let (lat, lon) = p
@@ -1035,7 +1176,13 @@ async fn main() -> anyhow::Result<()> {
                 }
                 None => 0,
             };
-            cfg.sources = d.network_excluding(center, round, n, &excluded)?;
+            cfg.sources = d.network_spaced(
+                center,
+                round,
+                n,
+                &excluded,
+                target.min_spacing_km.unwrap_or(150.),
+            )?;
             target.source_ids = cfg.sources.iter().map(|s| s.id.clone()).collect();
         }
         let result = capture::capture(&cfg, &target, Path::new("data/captures")).await;
@@ -1193,6 +1340,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/emissions", get(emissions))
         .route("/api/emissions/{id}", get(detail))
         .route("/api/emissions/{id}/evaluation", get(evaluate_observation))
+        .route("/api/tracks", get(tracks))
+        .route("/api/tracks/{key}", get(track_detail))
+        .route("/api/receivers/health", get(receiver_health))
         .route("/api/replay", post(replay))
         .route("/api/capture", post(start_capture))
         .route("/api/review", post(review))

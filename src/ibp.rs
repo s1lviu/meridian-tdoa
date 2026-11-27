@@ -114,10 +114,10 @@ pub fn analyze(path: &Path) -> Result<Analysis> {
         ensure!(
             file.starts_with(&root)
                 && total_bytes <= 64 * 1024 * 1024
-                && pipeline::checksum(&file)? == r.sha256,
+                && pipeline::checksum(&crate::iq::hashed_file(&file))? == r.sha256,
             "Invalid IQ path, size or hash"
         );
-        let iq = match kiwi::read(&file) {
+        let iq = match crate::iq::read(&file, &m) {
             Ok(iq) => iq,
             Err(err) => {
                 excluded.push(serde_json::json!({"id":r.id,"reason":err.to_string()}));

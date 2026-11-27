@@ -99,7 +99,7 @@ pub fn authorize(config: &Config, target: &Target) -> Result<Vec<LiveSource>> {
     ensure!(
         safe_id(&target.id)
             && (10..=120).contains(&target.duration_s)
-            && (3..=8).contains(&target.source_ids.len()),
+            && (3..=crate::pipeline::MAX_RECEIVERS).contains(&target.source_ids.len()),
         "Invalid target configuration"
     );
     ensure!(
