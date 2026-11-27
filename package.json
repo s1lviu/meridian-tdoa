@@ -1,12 +1,11 @@
 {
   "name": "meridian-tdoa-ui",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "module",
   "scripts": {
     "vendor": "node scripts/vendor.mjs",
-    "test:browser": "node tests/browser.mjs",
-    "test:browser:live": "node tests/live-observatory.mjs"
+    "test:browser": "node tests/browser.mjs target/debug/meridian-tdoa"
   },
   "dependencies": {
     "leaflet": "1.9.4",

@@ -63,7 +63,7 @@ fn locator(cell: &str) -> Option<(Point, f64)> {
 struct Reference<'a> {
     point: Point,
     radius: Option<f64>,
-    grid: Option<&'a str>,
+    grid: Option<String>,
     source: &'a str,
 }
 fn reference(e: &Emission) -> Option<Reference<'static>> {
@@ -80,13 +80,24 @@ fn reference(e: &Emission) -> Option<Reference<'static>> {
             grid: None,
             source: &DCF.source,
         }),
+        meridian_tdoa::ft8_tdoa::PROFILE => {
+            // The locator the station itself sent (hold-out; never a solver input).
+            let grid = e.reference.as_ref()?.ft8.as_ref()?.grid.clone()?;
+            let (point, radius) = meridian_tdoa::calibration::grid4(&grid)?;
+            Some(Reference {
+                point,
+                radius: Some(radius),
+                grid: Some(grid),
+                source: "Locator sent in the decoded FT8 message",
+            })
+        }
         ibp::PROFILE if ibp::band(e.frequency_hz).is_some() => {
             let grid = IBP.locators.get(&e.identity.as_ref()?.callsign)?;
             let (point, radius) = locator(grid)?;
             Some(Reference {
                 point,
                 radius: Some(radius),
-                grid: Some(grid),
+                grid: Some(grid.clone()),
                 source: &IBP.source,
             })
         }
@@ -240,4 +251,57 @@ mod tests {
         assert_eq!(stats[1]["median_error_km"], row["error_km"]);
         assert_eq!(stats[2]["median_error_km"], Value::Null);
     }
+}
+
+/// Worldwide summary for a UTC interval: one row per profile and band (or channel), with the
+/// post-hoc accuracy against the hold-out reference where one exists (DCF77, IBP, FT8 grid).
+pub fn summary(results: &[Emission]) -> Vec<Value> {
+    use std::collections::BTreeMap;
+    let mut groups: BTreeMap<(String, String), Vec<&Emission>> = BTreeMap::new();
+    for e in results
+        .iter()
+        .filter(|e| e.mode == "live" && !e.fault_injected)
+    {
+        let profile = e
+            .reference
+            .as_ref()
+            .map_or("unverified".to_string(), |r| r.profile.clone());
+        let band = meridian_tdoa::bands::name(e.frequency_hz).map_or_else(
+            || {
+                if e.frequency_hz < 300e3 {
+                    format!("LF {:.1} kHz", e.frequency_hz / 1e3)
+                } else {
+                    format!("{:.3} MHz", e.frequency_hz / 1e6)
+                }
+            },
+            str::to_owned,
+        );
+        groups.entry((profile, band)).or_default().push(e);
+    }
+    groups
+        .into_iter()
+        .map(|((profile, band), es)| {
+            let heard = es.iter().filter(|e| e.detected).count();
+            let timed = es.iter().filter(|e| e.receivers.iter().filter(|r| r.confirmed).count() >= 2).count();
+            let located: Vec<_> = es.iter().filter(|e| e.estimate.is_some()).collect();
+            let mut errors = vec![];
+            let mut covered = 0;
+            for e in &located {
+                if let (Some(r), Some(est)) = (reference(e), &e.estimate) {
+                    errors.push(geo::distance(est.center, r.point));
+                    covered += meridian_tdoa::calibration::contains(&est.polygon, r.point) as usize;
+                }
+            }
+            errors.sort_by(f64::total_cmp);
+            let n = errors.len();
+            let median = (n > 0).then(|| (errors[(n - 1) / 2] + errors[n / 2]) / 2.);
+            let p90 = (n > 0).then(|| errors[(n * 9).div_ceil(10) - 1]);
+            let distinct: std::collections::HashSet<_> = es.iter().filter_map(|e| e.identity.as_ref().map(|i| i.callsign.as_str())).collect();
+            json!({"profile":profile,"band":band,"observations":es.len(),"heard":heard,"timed_two_plus":timed,
+                "located":located.len(),"distinct_identities":distinct.len(),"evaluated":n,
+                "median_error_km":median,"p90_error_km":p90,
+                "contour_coverage":(n > 0).then(|| covered as f64 / n as f64),
+                "latest_utc":es.iter().map(|e| e.start_utc.as_str()).max()})
+        })
+        .collect()
 }

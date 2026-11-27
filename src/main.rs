@@ -412,6 +412,42 @@ async fn track_detail(State(app): State<App>, ApiPath(key): ApiPath<String>) -> 
         json!({"track":t,"ellipse_95":{"major_km":major,"minor_km":minor,"azimuth_deg":azimuth},"observations":observations}),
     ))
 }
+#[derive(Default, Deserialize)]
+struct StatsQuery {
+    start: Option<String>,
+    end: Option<String>,
+}
+/// Key figures per profile and band for a UTC interval (default: the last 24 h).
+async fn stats(State(app): State<App>, Query(q): Query<StatsQuery>) -> Api<Value> {
+    let parse = |s: Option<&str>, default: DateTime<Utc>| -> Result<DateTime<Utc>, Error> {
+        s.map_or(Ok(default), |v| {
+            DateTime::parse_from_rfc3339(v)
+                .map(|t| t.with_timezone(&Utc))
+                .map_err(bad)
+        })
+    };
+    let end = parse(q.end.as_deref(), Utc::now())?;
+    let start = parse(q.start.as_deref(), end - chrono::Duration::hours(24))?;
+    if end <= start {
+        return Err(bad("UTC interval must be increasing"));
+    }
+    let rows = app
+        .db
+        .emissions(&db::Query {
+            mode: "live".into(),
+            fault: false,
+            low_hz: 0.,
+            high_hz: 6e9,
+            start_ms: start.timestamp_millis(),
+            end_ms: end.timestamp_millis(),
+            limit: 200_000,
+        })
+        .map_err(internal)?;
+    Ok(Json(
+        json!({"start":start,"end":end,"rows":evaluation::summary(&rows),
+        "note":"Errors are post-hoc distances to a hold-out reference (published DCF77/IBP positions, or the locator a station sent in its own FT8 message). The solver never sees them."}),
+    ))
+}
 async fn receiver_health(State(app): State<App>) -> Api<Value> {
     Ok(Json(
         json!({"policy":app.config.receivers,"receivers":app.db.receiver_health().map_err(internal)?,
@@ -1607,6 +1643,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/emissions/{id}", get(detail))
         .route("/api/emissions/{id}/evaluation", get(evaluate_observation))
         .route("/api/tracks", get(tracks))
+        .route("/api/stats", get(stats))
         .route("/api/tracks/{key}", get(track_detail))
         .route("/api/receivers/health", get(receiver_health))
         .route(

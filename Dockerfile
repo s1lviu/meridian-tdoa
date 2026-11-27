@@ -1,14 +1,16 @@
 # syntax=docker/dockerfile:1
 FROM rust:1.100.0-slim-bookworm@sha256:bb875b0f8ce726053e259034848c471840e96bfe591fd52556178ae9a05e6126 AS build
 WORKDIR /build
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml Cargo.lock build.rs ./
+COPY third_party/ft8_lib ./third_party/ft8_lib
 COPY src ./src
 COPY web/dcf77-reference.json web/ibp-evaluation.json ./web/
 RUN --mount=type=secret,id=proxy_ca \
     --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
     if [ -s /run/secrets/proxy_ca ]; then export CARGO_HTTP_CAINFO=/run/secrets/proxy_ca; fi; \
-    cargo build --release --locked && cp target/release/meridian-tdoa /usr/local/bin/meridian-tdoa
+    cargo build --release --locked \
+    && cp target/release/meridian-tdoa target/release/meridian-node /usr/local/bin/
 
 FROM python:3.13.9-slim-bookworm@sha256:b685a4fa58bb19d1814d78a1ec0f0208f351452724f78b20212c984d6e124a34 AS runtime
 WORKDIR /app
@@ -24,7 +26,7 @@ RUN printf 'c23f94ca325826cb8a0ba5e17f2a974c1318b05726070d5070e8a3b399958cc0  /t
     && rm /tmp/kiwiclient.tar.gz \
     && groupadd -g 10001 meridian && useradd -u 10001 -g meridian -M meridian \
     && mkdir -p data && chown 10001:10001 data
-COPY --from=build /usr/local/bin/meridian-tdoa /usr/local/bin/meridian-tdoa
+COPY --from=build /usr/local/bin/meridian-tdoa /usr/local/bin/meridian-node /usr/local/bin/
 COPY web ./web
 COPY config ./config
 COPY scripts/kiwi_transport.py scripts/container-entrypoint.sh ./scripts/

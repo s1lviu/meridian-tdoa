@@ -1,14 +1,10 @@
 <!doctype html>
 <html lang="en">
   <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <meta name="theme-color" content="#10151b" />
-    <title>Meridian — TDoA Observatory</title>
-    <meta
-      name="description"
-      content="TDoA radio observatory: synchronized IQ recordings, estimated regions and verifiable provenance."
-    />
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Meridian TDoA</title>
+    <meta name="description" content="Transmitters located from our own SDR captures by time difference of arrival." />
     <link rel="stylesheet" href="/vendor/leaflet/leaflet.css" />
     <link rel="stylesheet" href="/style.css" />
     <script defer src="/vendor/leaflet/leaflet.js"></script>
@@ -17,283 +13,118 @@
   </head>
   <body>
     <header class="topbar">
-      <a class="brand" href="/" aria-label="Meridian home"
-        ><span class="brand-symbol"><i data-lucide="radio-tower"></i></span
-        ><span
-          >meridian<span class="brand-dot">.</span
-          ><small>RADIO OBSERVATORY</small></span
-        ></a
-      >
-      <div class="header-divider"></div>
-      <span class="workspace-label"
-        >TDoA network <span class="beta">LAB</span></span
-      >
-      <div class="header-right">
-        <span class="clock" id="clock">— UTC</span
-        ><button
-          class="icon-button"
-          id="help"
-          title="Methodology and sources"
-          aria-label="Methodology and sources"
-        >
-          <i data-lucide="book-open"></i></button
-        ><span class="avatar">M</span>
+      <div class="brand"><i data-lucide="radar"></i><span>Meridian</span><small>TDoA</small></div>
+      <div class="modes" role="tablist" aria-label="Data source">
+        <button id="mode-live" role="tab" aria-selected="true">Live</button>
+        <button id="mode-replay" role="tab" aria-selected="false">Recording</button>
       </div>
+      <div class="status" id="status" role="status" aria-live="polite">Connecting…</div>
+      <button id="help" class="icon-button" title="Method and limits" aria-label="Method and limits"><i data-lucide="circle-help"></i></button>
     </header>
-    <div class="app-shell">
-      <aside class="sidebar">
-        <div class="nav-label">WORKSPACE</div>
-        <nav aria-label="Main navigation">
-          <button class="nav-item active" id="nav-map">
-            <i data-lucide="map"></i>Explore map<span class="nav-arrow"
-              >↗</span
-            ></button
-          ><button class="nav-item" id="nav-recordings">
-            <i data-lucide="audio-lines"></i>Recordings<span
-              class="nav-count"
-              id="dataset-count"
-              >—</span
-            ></button
-          ><button class="nav-item" id="nav-sources">
-            <i data-lucide="radio"></i>SDR receivers
-          </button>
-        </nav>
-        <div class="sidebar-separator"></div>
-        <div class="section-heading">
-          <h2>Observation filters</h2>
-          <button class="text-button" id="reset">Reset</button>
+
+    <main class="layout">
+      <section class="map-card" aria-label="Transmitter map">
+        <div id="map"></div>
+        <div class="map-overlay top">
+          <span id="mode-badge" class="badge live">LIVE · OWN RF ONLY</span>
+          <label class="switch"><input type="checkbox" id="show-observations" checked /> Single fixes</label>
+          <label class="switch"><input type="checkbox" id="show-receivers" checked /> Receivers</label>
         </div>
-        <label class="input-label" for="band">FREQUENCY BAND</label>
-        <div class="select-wrap">
-          <i data-lucide="waves"></i
-          ><select id="band">
-            <option value="all">All bands</option>
-            <option value="lf">LF · below 300 kHz</option>
-            <option value="mf">MF · 300 kHz–3 MHz</option>
-            <option value="hf">HF · 3–30 MHz</option>
-            <option value="80m">80 metres</option>
-            <option value="40m">40 metres</option>
-            <option value="20m">20 metres</option>
-            <option value="17m">17 metres</option>
-            <option value="15m">15 metres</option>
-            <option value="12m">12 metres</option>
-            <option value="10m">10 metres</option>
-          </select>
+        <div class="map-overlay bottom legend">
+          <span><b class="key track"></b>Fused emitter (95%)</span>
+          <span><b class="key fix"></b>Single fix</span>
+          <span><b class="key hyp"></b>Ambiguous region</span>
+          <span><b class="key rx-used"></b>Receiver used</span>
+          <span><b class="key rx-heard"></b>Heard only</span>
         </div>
-        <div class="label-row">
-          <label class="input-label" for="start">CAPTURE INTERVAL</label
-          ><span class="tiny-chip">UTC</span>
+      </section>
+
+      <aside class="panel" aria-label="Controls and results">
+        <div class="filters">
+          <label>Window
+            <select id="window">
+              <option value="1">Last hour</option>
+              <option value="6" selected>Last 6 h</option>
+              <option value="24">Last 24 h</option>
+              <option value="168">Last 7 days</option>
+            </select>
+          </label>
+          <label>Band
+            <select id="band">
+              <option value="all">All</option>
+              <option value="lf">LF</option>
+              <option value="mf">MF</option>
+              <option value="hf">HF</option>
+              <option value="vhf">VHF</option>
+              <option value="uhf">UHF</option>
+              <option value="40m">40 m</option>
+              <option value="30m">30 m</option>
+              <option value="20m">20 m</option>
+              <option value="17m">17 m</option>
+              <option value="15m">15 m</option>
+            </select>
+          </label>
+          <label>Signal
+            <select id="profile">
+              <option value="all">All</option>
+              <option value="ft8_v1">FT8 (decoded)</option>
+              <option value="dcf77_prn_v1">DCF77 (phase code)</option>
+              <option value="correlated_v1">Unknown emitters</option>
+              <option value="mlat_v1">Own nodes</option>
+              <option value="ncdxf_cw_v1">IBP beacons</option>
+            </select>
+          </label>
         </div>
-        <label class="date-label" for="start">From</label
-        ><input type="datetime-local" id="start" step="1" /><label
-          class="date-label"
-          for="end"
-          >Until</label
-        ><input type="datetime-local" id="end" step="1" /><button
-          class="apply-button"
-          id="apply"
-        >
-          <i data-lucide="sliders-horizontal"></i>Apply interval
-        </button>
-        <p id="filter-error" class="error-text" role="alert"></p>
-        <label id="follow-live-label" class="catalog-check" hidden><input type="checkbox" id="follow-live" checked> Follow the last UTC hour</label>
-        <div class="sidebar-separator"></div>
-        <div class="section-heading">
-          <h2>TDoA results in view</h2>
-          <span class="count" id="emission-count">0</span>
-        </div>
-        <p class="muted caption">Estimated regions intersecting the map</p>
-        <div id="emissions" class="emission-list" aria-live="polite"></div>
-        <div id="unlocated"></div>
-        <div class="sidebar-bottom">
-          <div class="integrity-icon"><i data-lucide="shield-check"></i></div>
-          <div>
-            <strong>Results supported by evidence</strong>
-            <p>
-              At least 3 independent receivers.<br />Without synchronization, no
-              position.
-            </p>
+
+        <section class="card" aria-labelledby="located-title">
+          <h2 id="located-title">Located emitters <small id="located-count">0</small></h2>
+          <ol id="track-list" class="list"></ol>
+          <p class="empty" id="track-empty">No transmitter located in this window yet.</p>
+        </section>
+
+        <section class="card" aria-labelledby="heard-title">
+          <h2 id="heard-title">Heard, position undetermined <small id="heard-count">0</small></h2>
+          <ol id="heard-list" class="list compact"></ol>
+        </section>
+
+        <section class="card" aria-labelledby="stats-title">
+          <h2 id="stats-title">Measured performance <small>post hoc, hold-out references</small></h2>
+          <div class="table-scroll">
+            <table class="stats">
+              <thead><tr><th>Signal · band</th><th>Heard</th><th>Timed ≥2</th><th>Fixes</th><th>Error</th><th>In 95%</th></tr></thead>
+              <tbody id="stats-body"></tbody>
+            </table>
           </div>
-        </div>
-        <div class="api-status">
-          <span class="status-dot" id="api-dot"></span
-          ><span id="api-status">Connecting to API</span><span>v0.2</span>
-        </div>
+        </section>
+
+        <section class="card replay" id="replay-card" hidden aria-labelledby="replay-title">
+          <h2 id="replay-title">Archived recording</h2>
+          <p id="replay-text"></p>
+          <div class="buttons">
+            <button id="replay-open" class="primary"><i data-lucide="play"></i>Open recording</button>
+            <button id="sync-loss"><i data-lucide="satellite-dish"></i>Test GNSS loss</button>
+          </div>
+        </section>
+
+        <section class="card admin" aria-labelledby="admin-title">
+          <h2 id="admin-title">Operator</h2>
+          <div class="buttons">
+            <button id="capture-open"><i data-lucide="radio"></i>Request capture</button>
+            <button id="network-open"><i data-lucide="network"></i>Receiver health</button>
+          </div>
+        </section>
       </aside>
-      <main>
-        <div class="page-heading">
-          <div>
-            <div class="eyebrow">RADIO · TIME · SPACE</div>
-            <h1 id="page-title">Radio observatory</h1>
-            <p id="page-description">Localization by time difference of arrival.</p>
-          </div>
-          <div class="mode-switch" role="group" aria-label="Data source">
-            <button id="mode-replay" class="selected">
-              <i data-lucide="history"></i>Recordings</button
-            ><button id="mode-live"><span class="live-dot"></span>Live</button>
-          </div>
-        </div>
-        <div class="observation-bar">
-          <div class="observation-type">
-            <span class="badge" id="mode-badge">CONNECTING</span
-            ><span id="observation-title">Connecting to the observatory…</span>
-          </div>
-          <span id="monitor-clock" class="mono" hidden></span>
-          <button id="replay" class="small-button">
-            <i data-lucide="rotate-cw"></i>Reprocess
-          </button>
-        </div>
-        <section id="transmitters" class="history-card transmitter-bar" aria-labelledby="transmitter-title" hidden>
-          <div class="history-head">
-            <h2 id="transmitter-title">Transmitter positions <small>Selected band and UTC interval · worldwide</small></h2>
-            <label class="reception-switch"><input type="checkbox" id="show-reception"> Show receivers</label>
-          </div>
-          <div id="located-stations" class="station-list" aria-label="Located by TDoA"></div>
-          <p id="station-notice" class="band-note" role="status" hidden></p>
-          <details id="unresolved-stations" open hidden>
-            <summary></summary><div class="station-list"></div>
-          </details>
-        </section>
-        <section class="map-card" aria-label="Interactive emission map">
-          <div id="map"></div>
-          <div class="map-vignette"></div>
-          <div class="map-top">
-            <span class="map-caption" id="map-method"><span class="status-dot"></span>TDoA-ONLY LOCALIZATION</span>
-            <button id="map-activity" class="map-action" type="button" aria-controls="beacon-roster" hidden></button>
-            <button class="map-action" id="fit">
-              <i data-lucide="scan"></i>Fit receiver network
-            </button>
-          </div>
-          <div class="map-bottom">
-            <div class="legend">
-              <span><b class="legend-transmitter"></b>TDoA transmitter</span><span><b class="legend-region"></b>Region / hypothesis</span
-              ><span id="prior-legend" hidden><b class="legend-prior"></b>Previous contour</span
-              ><span class="reception-key"><b class="legend-rx"></b>Used in calculation</span
-              ><span class="reception-key"><b class="legend-unused"></b>Confirmed reception</span>
-              <span id="pool-legend" hidden><b class="legend-pool"></b>Eligible receiver</span>
-              <span id="directory-legend" hidden><b class="legend-directory"></b>Directory receiver</span>
-            </div>
-            <span class="map-position" id="map-position">EUROPE / 5×</span>
-          </div>
-          <div class="map-note" id="map-note" hidden></div>
-          <aside
-            id="inspector"
-            class="inspector"
-            aria-label="Selected emission details"
-            hidden
-          ></aside>
-          <div class="empty-map" id="empty-map" hidden>
-            <i data-lucide="radar"></i>
-            <h2>Unmonitored interval</h2>
-            <p>
-              No recordings match these filters.<br />Missing data does not
-              mean there were no emissions.
-            </p>
-            <button id="back-recording" class="primary-button">
-              Open the reference recording
-            </button>
-          </div>
-        </section>
-        <section id="beacon-network" class="history-card" aria-labelledby="network-title" hidden>
-          <div class="history-head">
-            <h2 id="network-title">International Beacon Project <small>Scheduled now · UTC</small></h2>
-            <button id="world-network" class="small-button" type="button"><i data-lucide="globe"></i>World view</button>
-          </div>
-          <div id="band-schedule" class="band-schedule" aria-label="Scheduled callsign on each beacon channel"></div>
-          <div class="network-controls">
-            <label><input id="show-pool" type="checkbox" checked> Eligible HF receivers</label>
-            <label><input id="show-directory" type="checkbox" checked> Other directory receivers</label>
-            <button id="all-bands" type="button" class="text-button">Show all bands</button>
-            <a href="https://www.ncdxf.org/beacon/" target="_blank" rel="noopener noreferrer">Beacon schedule ↗</a>
-          </div>
-          <p class="band-note" id="directory-view" role="status"></p>
-          <details id="band-report" open>
-            <summary>Measured reception and accuracy <small>Selected UTC interval · worldwide</small></summary>
-            <div class="band-table-scroll"><table class="band-table">
-              <thead><tr><th scope="col">Band</th><th scope="col">Scheduled attempts</th><th scope="col">Sampled</th><th scope="col">Verified</th><th scope="col">Beacons</th><th scope="col">Unique fixes</th><th scope="col">Ambiguous</th><th scope="col">Evaluated</th><th scope="col">Median error</th><th scope="col">P90 error</th></tr></thead>
-              <tbody id="band-stats"></tbody>
-            </table></div>
-            <p class="band-note">Sampled counts processed UTC windows. HF errors use the centre of the published locator after a unique fix. LF uses the PTB reference. A dash means there is no measured error for that band.</p>
-          </details>
-          <details id="beacon-roster"><summary>Beacon observations <small id="roster-count"></small></summary><div id="roster-list"></div></details>
-        </section>
-        <section id="live-history" class="history-card" aria-labelledby="history-title" hidden>
-          <div class="history-head">
-            <h2 id="history-title">Observation history <small>UTC · newest first</small></h2>
-            <div class="history-actions">
-              <button id="fit-estimates" class="small-button" type="button" hidden>Zoom to contours</button>
-              <button id="latest-fix" class="small-button" type="button">Follow latest</button>
-            </div>
-          </div>
-          <div id="history-fixes" class="history-fixes" aria-label="Observations by UTC time"></div>
-          <div class="comparison-row">
-            <div id="fix-change" aria-live="polite"></div>
-            <div id="receiver-comparison" class="comparison-switch" role="group" aria-label="Compare receivers from the same capture" hidden>
-              <button type="button" id="three-rx" aria-pressed="false">3 receivers</button>
-              <button type="button" id="all-rx" aria-pressed="true">Full network</button>
-            </div>
-          </div>
-        </section>
-        <section class="analysis-card">
-          <div class="analysis-head">
-            <div>
-              <i data-lucide="chart-no-axes-combined"></i>
-              <h2>Observation log</h2>
-              <span id="analysis-subtitle">UTC · recorded channel</span>
-            </div>
-            <button class="text-button" id="test-sync">
-              <i data-lucide="unplug"></i>Test GNSS loss
-            </button>
-          </div>
-          <div class="analysis-body">
-            <div class="spectrum-wrap">
-              <div class="spectrum-label">
-                <span>IQ SPECTRUM <span class="dim">/ relative dBFS</span></span
-                ><span id="spectrum-freq">—</span>
-              </div>
-              <svg
-                id="spectrum"
-                viewBox="0 0 600 80"
-                preserveAspectRatio="none"
-                role="img"
-                aria-label="Spectrum calculated from IQ samples"
-              ></svg>
-              <div class="spectrum-ticks">
-                <span>−6 kHz</span><span>Centre frequency</span
-                ><span>+6 kHz</span>
-              </div>
-            </div>
-            <div class="coverage-summary">
-              <div id="coverage-title">
-                <span class="amber-dot"></span>Unmonitored interval
-              </div>
-              <p id="coverage-detail">
-                Checking the available interval and channels.
-              </p>
-              <div id="capture-window" class="mono">—</div>
-              <svg id="coverage-track" viewBox="0 0 600 12" preserveAspectRatio="none" role="img" aria-label="Recorded intervals and gaps" hidden></svg>
-            </div>
-          </div>
-        </section>
-        <footer class="page-footer">
-          <span
-            ><i data-lucide="info"></i>Uncertainty is part of the result,
-            including when no position can be determined.</span
-          ><button class="text-button" id="methodology">
-            Methodology and provenance <span>↗</span>
-          </button>
-        </footer>
-      </main>
-    </div>
+    </main>
+
+    <aside id="inspector" class="inspector" aria-label="Selected emitter or observation" hidden></aside>
+
     <dialog id="modal">
-      <div class="modal-head">
+      <form method="dialog" class="modal-head">
         <h2 id="modal-title"></h2>
-        <button class="icon-button" id="close-modal" aria-label="Close">
-          <i data-lucide="x"></i>
-        </button>
-      </div>
-      <div id="modal-content"></div>
+        <button class="icon-button" aria-label="Close" value="close"><i data-lucide="x"></i></button>
+      </form>
+      <div id="modal-body"></div>
     </dialog>
-    <div id="toast" role="status" hidden></div>
+    <div id="toast" role="alert" hidden></div>
   </body>
 </html>

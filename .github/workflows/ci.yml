@@ -15,22 +15,17 @@ jobs:
       - run: cargo +1.100.0 fmt -- --check
       - run: cargo +1.100.0 test --locked
       - run: python3 tests/transport.py
+      - name: Node detections end to end (simulated nodes, real server process)
+        run: cargo +1.100.0 build --locked && python3 tests/detections.py target/debug/meridian-tdoa
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
           cache: npm
       - run: npm ci
       - run: npx playwright install --with-deps chromium
-      - name: Browser verification on actual archived IQ
-        env:
-          MERIDIAN_DIRECTORY_OFFLINE: '1'
+      - name: Browser verification (bundled real IQ replay, simulated own-node detections)
         run: |
-          mkdir -p data/state
-          cp evidence/live/directory.json data/state/directory.json
-          cargo +1.100.0 build --locked
-          target/debug/meridian-tdoa > /tmp/meridian.log 2>&1 &
           export CHROMIUM_PATH="$(node --input-type=module -e 'import {chromium} from "playwright"; process.stdout.write(chromium.executablePath())')"
-          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:3000/api/ready && break || sleep 1; done
           npm run test:browser
       - uses: actions/upload-artifact@v4
         if: always()
