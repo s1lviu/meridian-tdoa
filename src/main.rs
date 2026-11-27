@@ -6,19 +6,18 @@ use axum::{
     routing::{get, post},
 };
 use chrono::{DateTime, Utc};
-use meridian_tdoa::{capture, directory, geo, ibp, model::*, pipeline, protocol, store};
+use meridian_tdoa::{bands, capture, directory, geo, ibp, model::*, pipeline, protocol, store};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex, RwLock,
+        Arc, RwLock,
         atomic::{AtomicBool, Ordering},
     },
 };
 use tower_http::services::ServeDir;
-mod activity;
 mod evaluation;
 mod monitor;
 
@@ -34,7 +33,6 @@ struct App {
     directory_refreshing: Arc<AtomicBool>,
     stopping: Arc<AtomicBool>,
     monitor: Arc<RwLock<monitor::Status>>,
-    activity: Arc<Mutex<activity::Activity>>,
 }
 struct Error(StatusCode, String);
 impl IntoResponse for Error {
@@ -121,7 +119,7 @@ fn selection(q: Filters) -> Result<Selection, Error> {
         "mf" => (300e3, 3e6),
         "hf" => (3e6, 30e6),
         "other" => (f64::INFINITY, f64::INFINITY),
-        name => activity::BANDS
+        name => bands::BANDS
             .iter()
             .find(|(band, _, _)| *band == name)
             .map(|(_, lo, hi)| (lo * 1e6, hi * 1e6))
@@ -408,16 +406,10 @@ fn pending_captures() -> Vec<Manifest> {
         })
         .collect()
 }
-async fn digital_activity(State(app): State<App>) -> Json<Value> {
-    Json(app.activity.lock().unwrap().snapshot(
-        app.config.live_enabled && app.config.digital_reports,
-        Utc::now().timestamp(),
-    ))
-}
 
 async fn info(State(app): State<App>) -> Json<Value> {
     Json(
-        json!({"name":"Meridian","version":env!("CARGO_PKG_VERSION"),"live_enabled":app.config.live_enabled,"digital_reports":app.config.live_enabled && app.config.digital_reports,"band_ranges_mhz":activity::BANDS,"admin_configured":app.token.is_some(),"sources":app.config.sources,"targets":app.config.targets,"pending_captures":pending_captures(),"busy":app.busy.load(Ordering::SeqCst),"latest_live":app.results.read().unwrap().iter().filter(|e|e.mode=="live").map(|e| &e.start_utc).max(),"datasets":app.datasets.iter().map(|(m,_)|m).collect::<Vec<_>>(),"policy":"Public beacons, participating stations and the public DCF77 time reference for commissioning. Identity is not inferred from frequency or position."}),
+        json!({"name":"Meridian","version":env!("CARGO_PKG_VERSION"),"live_enabled":app.config.live_enabled,"band_ranges_mhz":bands::BANDS,"admin_configured":app.token.is_some(),"sources":app.config.sources,"targets":app.config.targets,"pending_captures":pending_captures(),"busy":app.busy.load(Ordering::SeqCst),"latest_live":app.results.read().unwrap().iter().filter(|e|e.mode=="live").map(|e| &e.start_utc).max(),"datasets":app.datasets.iter().map(|(m,_)|m).collect::<Vec<_>>(),"policy":"Public beacons, participating stations and the public DCF77 time reference for commissioning. Identity is not inferred from frequency or position."}),
     )
 }
 #[derive(Default, Deserialize)]
@@ -1004,7 +996,6 @@ async fn main() -> anyhow::Result<()> {
         directory_refreshing: Arc::new(AtomicBool::new(false)),
         stopping: Arc::new(AtomicBool::new(false)),
         monitor: Arc::new(RwLock::new(monitor::Status::default())),
-        activity: Arc::new(Mutex::new(activity::Activity::default())),
     };
     let directory_app = app.clone();
     if std::env::var("MERIDIAN_DIRECTORY_OFFLINE").as_deref() != Ok("1") {
@@ -1038,7 +1029,6 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/api/info", get(info))
         .route("/api/beacons", get(beacons))
-        .route("/api/activity", get(digital_activity))
         .route("/api/ready", get(ready))
         .route("/api/sources", get(source_directory))
         .route("/api/directory/refresh", post(update_directory))
@@ -1054,9 +1044,6 @@ async fn main() -> anyhow::Result<()> {
         .layer(axum::middleware::from_fn(headers))
         .layer(axum::extract::DefaultBodyLimit::max(16384));
     let listener = tokio::net::TcpListener::bind(&listen).await?;
-    if shutdown_app.config.live_enabled && shutdown_app.config.digital_reports {
-        tokio::spawn(activity::run(shutdown_app.activity.clone()));
-    }
     if let Some((settings, target)) = monitor_target {
         tokio::spawn(monitor::run(shutdown_app.clone(), settings, target));
     }

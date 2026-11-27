@@ -1699,9 +1699,6 @@ dialog::backdrop {
 .network-controls label { white-space: nowrap; }
 .legend-pool { border: 1px solid #98c7dc; border-radius: 50%; background: #5c9bb2; }
 .legend-directory { border: 1.3px solid #9ca9b3; border-radius: 50%; background: transparent; }
-.legend .legend-digital { width:18px; height:6px; background:linear-gradient(90deg,#526f91,#a88ac8); }
-#digital-legend { display:inline-flex; align-items:center; gap:6px; background:none; border:0; padding:2px 0; color:#e0c8f1; font:inherit; cursor:pointer; pointer-events:auto; }
-.digital-status { color:#d3c1e2; font:12px var(--mono); line-height:1.5; margin:10px 0 0; }
 .transmitter-bar { margin:0 0 10px; }
 .transmitter-bar .history-head { flex-wrap:wrap; gap:8px; }
 .reception-switch { display:flex; align-items:center; gap:6px; color:#b8c8d2; font-size:12px; cursor:pointer; }
@@ -1715,9 +1712,6 @@ dialog::backdrop {
 #unresolved-stations button { border-color:#625540; background:#302b23; color:#e1ccad; }
 .legend .legend-transmitter { background:#c0ef85; border:1px solid #effdda; border-radius:50%; }
 .tx-coordinates { margin:0; padding:0 14px 10px; color:var(--green); font:11px var(--mono); }
-#digital-bands { margin:10px 0; }
-#digital-bands summary { cursor:pointer; font-size:13px; }
-#digital-panel a { color:#c7b2dc; }
 .receiver-popup :is(.leaflet-popup-content-wrapper, .leaflet-popup-tip) { background: #202c35; color: #e3edf2; }
 .receiver-popup .leaflet-popup-content p { margin: 7px 0; }
 .receiver-popup small { color: #bdccd5; }

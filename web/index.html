@@ -13,7 +13,6 @@
     <link rel="stylesheet" href="/style.css" />
     <script defer src="/vendor/leaflet/leaflet.js"></script>
     <script defer src="/vendor/lucide.js"></script>
-    <script defer src="/activity.js"></script>
     <script defer src="/app.js"></script>
   </head>
   <body>
@@ -147,7 +146,7 @@
         <section id="transmitters" class="history-card transmitter-bar" aria-labelledby="transmitter-title" hidden>
           <div class="history-head">
             <h2 id="transmitter-title">Transmitter positions <small>Selected band and UTC interval · worldwide</small></h2>
-            <label class="reception-switch"><input type="checkbox" id="show-reception"> Show reception activity</label>
+            <label class="reception-switch"><input type="checkbox" id="show-reception"> Show receivers</label>
           </div>
           <div id="located-stations" class="station-list" aria-label="Located by TDoA"></div>
           <p id="station-notice" class="band-note" role="status" hidden></p>
@@ -173,7 +172,6 @@
               ><span class="reception-key"><b class="legend-unused"></b>Confirmed reception</span>
               <span id="pool-legend" hidden><b class="legend-pool"></b>Eligible receiver</span>
               <span id="directory-legend" hidden><b class="legend-directory"></b>Directory receiver</span>
-              <button id="digital-legend" type="button" aria-controls="digital-bands" title="Show digital reports by band" hidden><b class="legend-digital"></b><span></span></button>
             </div>
             <span class="map-position" id="map-position">EUROPE / 5×</span>
           </div>
@@ -195,21 +193,6 @@
               Open the reference recording
             </button>
           </div>
-        </section>
-        <section id="digital-panel" class="history-card" aria-labelledby="digital-title" hidden>
-          <div class="history-head">
-            <h2 id="digital-title">Digital activity <small>Last 15 UTC minutes</small></h2>
-            <div class="network-controls">
-              <label><input type="checkbox" id="digital-ft8" checked> FT8</label>
-              <label><input type="checkbox" id="digital-wspr" checked> WSPR</label>
-            </div>
-          </div>
-          <p id="digital-status" role="status" class="digital-status"></p>
-          <p class="band-note">Shading shows the transmitter’s reported 20° × 10° region. Several receivers can report the same transmission. Select a region for counts or a band to filter the map.</p>
-          <details id="digital-bands"><summary>Reports by band</summary>
-            <div class="band-table-scroll"><table class="band-table"><thead><tr><th scope="col">Band</th><th scope="col">FT8 reports</th><th scope="col">WSPR reports</th><th scope="col">Latest UTC</th></tr></thead><tbody id="digital-rows"></tbody></table></div>
-          </details>
-          <p class="band-note">PSK Reporter by Philip Gladstone · WSPR reporting networks · MQTT feed by Tom Fanning M0LTE. <a href="https://www.mqtt.pskreporter.info/" target="_blank" rel="noopener noreferrer">Source and coverage ↗</a></p>
         </section>
         <section id="beacon-network" class="history-card" aria-labelledby="network-title" hidden>
           <div class="history-head">

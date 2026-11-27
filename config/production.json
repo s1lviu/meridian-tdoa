@@ -1,7 +1,6 @@
 {
   "listen": "0.0.0.0:3000",
   "live_enabled": true,
-  "digital_reports": true,
   "monitor": {
     "target_id": "dcf77-validation",
     "interval_s": 73,

@@ -64,7 +64,6 @@ const map = L.map("map", {
   maxZoom: 14,
   worldCopyJump: true,
 }).setView([49.5, 6.5], 5);
-const digital = digitalActivity(map);
 L.control
   .scale({ imperial: false, position: "bottomleft", maxWidth: 80 })
   .addTo(map);
@@ -391,8 +390,8 @@ async function refresh(selectFirst = false) {
           ? "No processed receiver window matches this band and UTC interval."
           : "No recordings match these filters. Missing data does not mean there were no emissions.";
       }
-      if (state.mode === "live" && (worldwide() || state.info.digital_reports) && !available.length) {
-        $("map-note").textContent = (state.info.digital_reports ? "TDoA · " : "") + h.textContent + " · " + p.textContent;
+      if (state.mode === "live" && worldwide() && !available.length) {
+        $("map-note").textContent = h.textContent + " · " + p.textContent;
         $("map-note").hidden = false;
         $("empty-map").hidden = true;
       }
@@ -1178,10 +1177,9 @@ function resetFilters(mode = state.mode, reception = false, station = null, band
   renderRegions([]);
   updateModeLabels();
   updateReceptionControls();
-  if (mode === "live" && (worldwide() || state.info.digital_reports)) worldView(); else map.setView([49.5, 6.5], 5);
+  if (mode === "live" && worldwide()) worldView(); else map.setView([49.5, 6.5], 5);
   drawPool();
   drawSchedule();
-  digital.refresh();
   refresh(true).then(() => { if (state.mode === "replay") fitNetwork(); });
 }
 function setMode(mode) {
@@ -1217,7 +1215,6 @@ function fitContours(solutions) {
 $("follow-live").onchange = () => {
   if ($("follow-live").checked) followLatest();
   else renderHistory();
-  digital.refresh();
 };
 for (const [id, three] of [["three-rx", true], ["all-rx", false]]) {
   $(id).onclick = () => {
@@ -1243,7 +1240,6 @@ $("reset").onclick = () => resetFilters();
 $("back-recording").onclick = () => resetFilters("replay");
 $("apply").onclick = () => {
   if (state.mode === "live") $("follow-live").checked = false;
-  digital.draw();
   clearSelection();
   state.pinned = false;
   state.manualClose = false;
@@ -1256,7 +1252,6 @@ function chooseBand(band) {
   state.pinned = false;
   state.manualClose = false;
   drawPool();
-  digital.draw();
   drawSchedule();
   refresh(true);
 }
@@ -1277,7 +1272,6 @@ for (const input of [$("start"), $("end")]) {
   input.oninput = () => {
     if (state.mode !== "live") return;
     $("follow-live").checked = false;
-    digital.draw();
     renderHistory();
   };
 }
@@ -1302,7 +1296,6 @@ $("show-reception").onchange = () => {
   updateReceptionControls();
   drawPool();
   drawRoster();
-  digital.refresh();
   renderSelected();
 };
 setInterval(
@@ -1317,17 +1310,11 @@ async function boot() {
   icons();
   try {
     state.info = await api("/api/info");
-    if (state.info.digital_reports) {
-      const select = $("band");
-      const known = new Set([...select.options].map(o => o.value));
-      for (const [b] of state.info.band_ranges_mhz) if (!known.has(b)) select.add(new Option(b, b));
-      select.add(new Option("Other reported bands", "other"));
-    }
     $("dataset-count").textContent = state.info.datasets.length;
     const params = new URLSearchParams(location.search);
     const live = state.info.live_enabled && !params.has("replay");
     const requestedStation = live ? params.get("station")?.trim().slice(0,32).toUpperCase() : null;
-    resetFilters(live ? "live" : "replay", params.has("field") || params.has("receiver") || params.get("view") === "activity", requestedStation, live ? params.get("band") : "all");
+    resetFilters(live ? "live" : "replay", params.has("receiver"), requestedStation, live ? params.get("band") : "all");
     await loadBeacons();
     if (live && params.has("receiver")) {
       const marker = [...pool.getLayers(), ...directoryOnly.getLayers()].find(l => l.options.receiverId === params.get("receiver"));
@@ -1335,7 +1322,7 @@ async function boot() {
         map.setView(marker.getLatLng(), 8, {animate: false});
         marker.openPopup();
       } else notify("No mapped directory position is available for this receiver.");
-    } else if (live && params.has("field")) await digital.focus(params.get("field").toUpperCase());
+    }
   } catch (err) {
     $("api-status").textContent = "API unavailable";
     notify(err.message);
@@ -1388,6 +1375,5 @@ setInterval(() => {
   if (state.mode === "live" && !document.hidden && !state.busy && state.info) {
     if ($("follow-live").checked) liveInterval();
     refresh(false);
-    digital.refresh();
   }
 }, 8000);

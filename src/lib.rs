@@ -1,3 +1,4 @@
+pub mod bands;
 pub mod capture;
 pub mod directory;
 pub mod dsp;

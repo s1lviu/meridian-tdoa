@@ -24,7 +24,7 @@ try {
     const transmitter = page.locator("#located-stations button").filter({hasText:"DCF77"});
     await transmitter.waitFor();
     assert.equal(await page.locator("#show-reception").isChecked(), false);
-    assert.equal(await page.locator(".heard-site, .digital-field").count(), 0);
+    assert.equal(await page.locator(".heard-site").count(), 0);
     assert.equal(await page.evaluate(() => pool.getLayers().length + directoryOnly.getLayers().length), 0);
     await transmitter.click();
     await page.locator(".tx-coordinates").waitFor();
@@ -144,61 +144,6 @@ try {
     console.log("PASS five live schedule channels, 18-beacon roster, read-only worldwide receiver layer, band filters and separate accuracy rows");
   }
   const config = await (await page.request.get(base + "/api/info")).json();
-  if (config.digital_reports) {
-    // A freshly started service may wait a full WSPR cycle for its first reports.
-    await page.waitForFunction(async () => {
-      const feed = await fetch("/api/activity").then(r => r.json());
-      return feed.connected && feed.reporters > 8 &&
-        ["FT8", "WSPR"].every(mode => feed.bands.some(row => row.mode === mode && row.reports > 0));
-    }, undefined, {polling:3000, timeout:180000});
-    const feed = await (await page.request.get(base + "/api/activity")).json();
-    assert.equal(feed.enabled, true);
-    assert.equal(feed.connected, true);
-    assert.ok(feed.reporters > 8);
-    assert.ok(["FT8","WSPR"].every(m => feed.bands.some(r => r.mode === m && r.reports > 0)));
-    const row = feed.bands.find(r => r.band === "30m" && Object.keys(r.fields).length) || feed.bands.find(r => Object.keys(r.fields).length);
-    assert.ok(row);
-    await page.getByRole("button", {name:/FT8 \+ WSPR · .+ reports/}).click();
-    assert.equal(await page.locator("#digital-bands").getAttribute("open"), "");
-    await page.locator(`[data-report-band="${row.band}"]`).click();
-    await page.waitForFunction(b => $("band").value === b && document.querySelector(".digital-field"), row.band);
-    await page.locator("#digital-ft8").uncheck();
-    await page.locator("#digital-wspr").uncheck();
-    assert.equal(await page.locator(".digital-field").count(),0);
-    assert.equal(await page.locator("#digital-legend").isVisible(),false);
-    await page.locator("#digital-wspr").check();
-    await page.locator("#digital-ft8").check();
-    await page.locator("#follow-live").uncheck();
-    assert.equal(await page.locator(".digital-field").count(),0);
-    await page.locator("#follow-live").check();
-    await page.locator("#all-bands").click();
-    const field = Object.keys(row.fields).sort((a,b) => row.fields[b]-row.fields[a])[0];
-    assert.match(field,/^[A-R]{2}$/);
-    await pinned.goto(base + "/?field=" + field);
-    await pinned.getByText("Reported transmitter field " + field, {exact:true}).waitFor();
-    assert.ok(await pinned.locator(".receiver-popup").innerText().then(t => t.includes("20° × 10°")));
-    await pinned.locator(".leaflet-popup-close-button").click();
-    await pinned.locator(".leaflet-popup").waitFor({state:"detached"});
-    await pinned.locator("#map").scrollIntoViewIfNeeded();
-    const point = await pinned.evaluate(field => {
-      const west = -180 + (field.charCodeAt(0) - 65) * 20;
-      const south = -90 + (field.charCodeAt(1) - 65) * 10;
-      const rect = map.getContainer().getBoundingClientRect();
-      for (const dx of [10, 5, 15]) for (const dy of [5, 2, 8]) {
-        const p = map.latLngToContainerPoint([south + dy, west + dx]);
-        const x = rect.left + p.x, y = rect.top + p.y;
-        if (document.elementFromPoint(x, y)?.classList.contains("digital-field")) return {x, y};
-      }
-    }, field);
-    assert.ok(point, "The receiver layer must allow clicking the digital field underneath");
-    await pinned.mouse.click(point.x, point.y);
-    await pinned.getByText("Reported transmitter field " + field, {exact:true}).waitFor();
-    await pinned.locator("#mode-replay").click();
-    assert.equal(await pinned.locator("#digital-panel").isVisible(),false);
-    assert.equal(await pinned.locator(".digital-field").count(),0);
-    await page.locator("#digital-bands summary").click();
-    console.log("PASS live FT8 and WSPR, >8 reporters, field links, band and mode filters, live UTC and replay isolation");
-  }
   await page.locator("#band").selectOption("lf");
   await page.waitForFunction(() => isDcf(state.selected) && state.data.history.every(isDcf));
   const fixes = page.locator(".history-fix");

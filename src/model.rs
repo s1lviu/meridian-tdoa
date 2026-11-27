@@ -173,8 +173,6 @@ pub struct Target {
 pub struct Config {
     pub listen: String,
     pub live_enabled: bool,
-    #[serde(default)]
-    pub digital_reports: bool,
     pub kiwirecorder_path: String,
     pub python: String,
     pub gps_utc_offset_s: i64,
