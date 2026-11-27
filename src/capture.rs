@@ -611,6 +611,7 @@ pub async fn record(capture: Capture) -> Result<PathBuf> {
             position_uncertainty_m: s.position_uncertainty_m,
             file: file.file_name().unwrap().to_string_lossy().into(),
             sha256: checksum(&file)?,
+            timing_sigma_ns: None,
         });
     }
     crate::store::atomic_json(&dir.join("capture-outcomes.json"), &outcomes)?;

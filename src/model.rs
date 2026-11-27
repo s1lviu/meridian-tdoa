@@ -22,6 +22,9 @@ pub struct Receiver {
     pub position_uncertainty_m: f64,
     pub file: String,
     pub sha256: String,
+    /// Declared timing uncertainty of the receiver's time base (SigMF nodes), ns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timing_sigma_ns: Option<f64>,
 }
 
 /// A captured receiver withheld from localization, with the RF reason recorded for provenance.
@@ -218,6 +221,12 @@ pub struct Config {
     pub retention: crate::retention::Policy,
     #[serde(default)]
     pub receivers: ReceiverPolicy,
+    /// Own receiver nodes that report arrival times (`POST /api/detections`).
+    #[serde(default)]
+    pub nodes: Vec<Node>,
+    /// Emitters with published positions used only to synchronize node clocks.
+    #[serde(default)]
+    pub reference_emitters: Vec<ReferenceEmitter>,
     /// Capture windows processed concurrently (each on disjoint receivers).
     #[serde(default = "two")]
     pub max_parallel_jobs: usize,
@@ -225,6 +234,24 @@ pub struct Config {
 
 fn two() -> usize {
     2
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Node {
+    pub id: String,
+    pub label: String,
+    pub position: Point,
+    pub position_evidence: Evidence,
+    /// SHA-256 (hex) of the node's bearer token; the token itself is never stored.
+    pub token_sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReferenceEmitter {
+    /// Detections whose `signal` starts with this prefix come from this emitter.
+    pub signal_prefix: String,
+    pub position: Point,
+    pub evidence: Evidence,
 }
 
 /// Fair use of volunteer receivers: a connection-time budget per receiver and UTC day,

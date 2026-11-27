@@ -17,5 +17,6 @@ pub mod protocol;
 pub mod retention;
 pub mod sigmf;
 pub mod store;
+pub mod sync;
 pub mod toa;
 pub mod tracks;

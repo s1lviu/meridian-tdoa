@@ -251,6 +251,18 @@ impl Db {
         Ok(())
     }
 
+    /// Change marker for push notifications: (newest live start, live rows, newest track update).
+    pub fn change_marker(&self) -> Result<(Option<i64>, i64, Option<i64>)> {
+        let conn = self.0.lock().unwrap();
+        let (a, n): (Option<i64>, i64) = conn.query_row(
+            "SELECT MAX(start_ms), COUNT(*) FROM emissions WHERE mode='live' AND fault=0",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let t: Option<i64> = conn.query_row("SELECT MAX(last_ms) FROM tracks", [], |r| r.get(0))?;
+        Ok((a, n, t))
+    }
+
     pub fn latest_live_start(&self) -> Result<Option<i64>> {
         let conn = self.0.lock().unwrap();
         Ok(conn.query_row(

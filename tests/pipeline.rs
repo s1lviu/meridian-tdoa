@@ -101,6 +101,7 @@ fn fourth_independent_receiver_can_remove_global_mirror_in_a_synthetic_geometry_
                 position_uncertainty_m: 0.,
                 file: String::new(),
                 sha256: String::new(),
+                timing_sigma_ns: None,
             },
             confirmed: true,
             used: true,

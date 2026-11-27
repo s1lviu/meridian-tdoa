@@ -580,6 +580,7 @@ pub(crate) mod tests {
                 },
                 position_uncertainty_m: 0.,
                 sha256: pipeline::checksum(&dir.path().join(&file)).unwrap(),
+                timing_sigma_ns: None,
                 file,
             });
         }

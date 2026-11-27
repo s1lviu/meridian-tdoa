@@ -36,6 +36,12 @@ struct App {
     workers: Arc<tokio::sync::Semaphore>,
     /// Receivers currently connected by an in-flight capture window.
     leases: Arc<Mutex<HashSet<String>>>,
+    /// Node clocks (reference-emitter synchronization) and detections awaiting association.
+    clocks: Arc<Mutex<meridian_tdoa::sync::Network>>,
+    pending:
+        Arc<Mutex<HashMap<String, (std::time::Instant, f64, Vec<meridian_tdoa::sync::Detection>)>>>,
+    /// Server-sent events: one JSON message whenever observations or tracks change.
+    events: tokio::sync::broadcast::Sender<String>,
     datasets: Arc<Vec<(Manifest, PathBuf)>>,
     token: Arc<Option<String>>,
     directory: Arc<RwLock<Option<directory::Directory>>>,
@@ -123,10 +129,12 @@ fn selection(q: Filters) -> Result<Selection, Error> {
         None
     };
     let (low, high) = match q.band.as_deref().unwrap_or("all") {
-        "all" => (0., 30e6),
+        "all" => (0., 6e9),
         "lf" => (0., 300e3),
         "mf" => (300e3, 3e6),
         "hf" => (3e6, 30e6),
+        "vhf" => (30e6, 300e6),
+        "uhf" => (300e6, 3e9),
         "other" => (f64::INFINITY, f64::INFINITY),
         name => bands::BANDS
             .iter()
@@ -409,6 +417,137 @@ async fn receiver_health(State(app): State<App>) -> Api<Value> {
         json!({"policy":app.config.receivers,"receivers":app.db.receiver_health().map_err(internal)?,
         "leased":app.leases.lock().unwrap().iter().cloned().collect::<Vec<_>>()}),
     ))
+}
+#[derive(Deserialize)]
+struct DetectionBatch {
+    detections: Vec<meridian_tdoa::sync::Detection>,
+    #[serde(default)]
+    frequency_hz: f64,
+}
+/// Node arrival-time reports. Each node authenticates with its own bearer token (hashed in config).
+async fn detections(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Json(b): Json<DetectionBatch>,
+) -> Api<Value> {
+    let token = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or("");
+    use sha2::{Digest, Sha256};
+    let hash = format!("{:x}", Sha256::digest(token.as_bytes()));
+    let node = app
+        .config
+        .nodes
+        .iter()
+        .find(|n| n.token_sha256 == hash)
+        .ok_or(Error(StatusCode::UNAUTHORIZED, "Unknown node token".into()))?;
+    if b.detections.len() > 1000
+        || b.detections.iter().any(|d| {
+            d.node != node.id || !d.local_s.is_finite() || !(d.sigma_s > 0. && d.sigma_s < 1.)
+        })
+    {
+        return Err(bad(
+            "Detections must come from the authenticated node, with finite times and 0 < σ < 1 s",
+        ));
+    }
+    let mut pending = app.pending.lock().unwrap();
+    for d in b.detections {
+        let entry = pending
+            .entry(d.signal.clone())
+            .or_insert_with(|| (std::time::Instant::now(), b.frequency_hz, vec![]));
+        entry.2.retain(|x| x.node != d.node);
+        entry.2.push(d);
+    }
+    Ok(Json(
+        json!({"accepted":true,"pending_signals":pending.len()}),
+    ))
+}
+const SHUTDOWN_EVENT: &str = "__shutdown__";
+/// Push channel for the map: `change` events instead of client polling.
+async fn stream(
+    State(app): State<App>,
+) -> axum::response::sse::Sse<
+    impl futures_core::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+> {
+    use tokio_stream::StreamExt;
+    let rx = tokio_stream::wrappers::BroadcastStream::new(app.events.subscribe());
+    // The stream ends on shutdown so open map tabs never hold the graceful stop.
+    let events = rx
+        .filter_map(|m| m.ok())
+        .take_while(|m| m != SHUTDOWN_EVENT)
+        .map(|data| {
+            Ok(axum::response::sse::Event::default()
+                .event("change")
+                .data(data))
+        });
+    axum::response::sse::Sse::new(events).keep_alive(axum::response::sse::KeepAlive::default())
+}
+async fn clock_state(State(app): State<App>) -> Json<Value> {
+    Json(
+        json!({"clocks":*app.clocks.lock().unwrap(),"reference_emitters":app.config.reference_emitters,
+        "nodes":app.config.nodes.iter().map(|n| json!({"id":n.id,"label":n.label,"position":n.position})).collect::<Vec<_>>()}),
+    )
+}
+/// Associate pending detections after a short window: references update clocks, targets are solved.
+fn settle_detections(app: &App) {
+    let ready: Vec<(String, f64, Vec<meridian_tdoa::sync::Detection>)> = {
+        let mut pending = app.pending.lock().unwrap();
+        let keys: Vec<String> = pending
+            .iter()
+            .filter(|(_, (at, _, _))| at.elapsed() >= std::time::Duration::from_secs(2))
+            .map(|(k, _)| k.clone())
+            .collect();
+        let mut ready: Vec<_> = keys
+            .into_iter()
+            .filter_map(|k| pending.remove(&k).map(|(_, f, d)| (k, f, d)))
+            .collect();
+        // Clock filters need events in time order; the map has none.
+        ready.sort_by(|a, b| {
+            let t = |d: &[meridian_tdoa::sync::Detection]| {
+                d.iter().map(|x| x.local_s).fold(f64::INFINITY, f64::min)
+            };
+            t(&a.2).total_cmp(&t(&b.2))
+        });
+        ready
+    };
+    let positions: std::collections::BTreeMap<String, Point> = app
+        .config
+        .nodes
+        .iter()
+        .map(|n| (n.id.clone(), n.position))
+        .collect();
+    let mut stored = vec![];
+    for (signal, frequency, seen) in ready {
+        if let Some(r) = app
+            .config
+            .reference_emitters
+            .iter()
+            .find(|r| signal.starts_with(&r.signal_prefix))
+        {
+            app.clocks
+                .lock()
+                .unwrap()
+                .reference(r.position, &positions, &seen);
+            continue;
+        }
+        let arrivals = app.clocks.lock().unwrap().corrected(&seen);
+        if arrivals.len() >= 3 {
+            stored.push(meridian_tdoa::sync::emission(
+                &signal,
+                &arrivals,
+                &app.config.nodes,
+                frequency,
+                Utc::now(),
+            ));
+        }
+    }
+    if !stored.is_empty() {
+        if let Err(e) = app.db.put_emissions(&stored) {
+            eprintln!("Could not store node detections: {e}");
+        }
+    }
 }
 async fn detail(State(app): State<App>, ApiPath(id): ApiPath<String>) -> Api<Emission> {
     app.db
@@ -1027,8 +1166,8 @@ async fn main() -> anyhow::Result<()> {
     // An unknown word must never fall through to starting the server.
     if let Some(cmd) = args.get(1) {
         anyhow::ensure!(
-            ["discover", "process", "capture", "calibrate"].contains(&cmd.as_str()),
-            "Unknown command {cmd}. Use: discover | process MANIFEST [FAULT_RECEIVER] | capture TARGET_ID | calibrate"
+            ["discover", "process", "capture", "calibrate", "ingest"].contains(&cmd.as_str()),
+            "Unknown command {cmd}. Use: discover | process MANIFEST [FAULT_RECEIVER] | capture TARGET_ID | calibrate [ft8] | ingest DIR [--profile P] [--center HZ]"
         );
     }
     if args.get(1).is_some_and(|v| v == "discover") {
@@ -1115,6 +1254,33 @@ async fn main() -> anyhow::Result<()> {
         Path::new("data/state/storage-check.json"),
         &json!({"checked_at":Utc::now().to_rfc3339()}),
     )?;
+    if args.get(1).is_some_and(|v| v == "ingest") {
+        // ingest DIR [--profile correlated_v1|ft8_v1] [--center HZ]: SigMF recordings, one per node.
+        let dir = args
+            .get(2)
+            .ok_or_else(|| anyhow::anyhow!("ingest DIR [--profile P] [--center HZ]"))?;
+        let flag = |name: &str| {
+            args.iter()
+                .position(|a| a == name)
+                .and_then(|i| args.get(i + 1))
+        };
+        let profile = flag("--profile")
+            .map(String::as_str)
+            .unwrap_or(meridian_tdoa::channel::PROFILE);
+        let center = flag("--center").map(|v| v.parse::<f64>()).transpose()?;
+        let manifest = meridian_tdoa::sigmf::ingest(
+            Path::new(dir),
+            Path::new("data/captures"),
+            profile,
+            center,
+            config.gps_utc_offset_s,
+        )?;
+        let db = Db::open(Path::new("data/meridian.sqlite"))?;
+        let m: Manifest = serde_json::from_slice(&std::fs::read(&manifest)?)?;
+        let (_, summary) = process_ibp(&db, &manifest, &m.id)?;
+        println!("{}", serde_json::to_string_pretty(&summary)?);
+        return Ok(());
+    }
     if args.get(1).is_some_and(|v| v == "capture") {
         // capture TARGET_ID [--directory N [--near LAT,LON]]
         let mut target = config
@@ -1257,6 +1423,9 @@ async fn main() -> anyhow::Result<()> {
         persistence_failures: Arc::new(Mutex::new(HashSet::new())),
         workers: Arc::new(tokio::sync::Semaphore::new(parallel)),
         leases: Arc::new(Mutex::new(HashSet::new())),
+        clocks: Arc::new(Mutex::new(meridian_tdoa::sync::Network::default())),
+        pending: Arc::new(Mutex::new(HashMap::new())),
+        events: tokio::sync::broadcast::channel(64).0,
         datasets: Arc::new(datasets),
         token: Arc::new(
             std::env::var("MERIDIAN_ADMIN_TOKEN_FILE")
@@ -1296,6 +1465,92 @@ async fn main() -> anyhow::Result<()> {
             }
         });
     }
+    let push_app = app.clone();
+    tokio::spawn(async move {
+        let mut last = None;
+        while !push_app.stopping.load(Ordering::SeqCst) {
+            if let Ok(marker) = push_app.db.change_marker() {
+                if last != Some(marker) {
+                    if last.is_some() {
+                        let (start, rows, track) = marker;
+                        let _ = push_app.events.send(
+                            json!({"latest_live":start.and_then(DateTime::from_timestamp_millis),"live_rows":rows,
+                                "tracks_updated":track.and_then(DateTime::from_timestamp_millis)}).to_string(),
+                        );
+                    }
+                    last = Some(marker);
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+    });
+    let settle_app = app.clone();
+    tokio::spawn(async move {
+        while !settle_app.stopping.load(Ordering::SeqCst) {
+            settle_detections(&settle_app);
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+    });
+    let inbox_app = app.clone();
+    tokio::spawn(async move {
+        // data/inbox/<event>/ with *.sigmf-meta + *.sigmf-data and an empty READY file.
+        loop {
+            if inbox_app.stopping.load(Ordering::SeqCst) {
+                break;
+            }
+            let ready: Vec<PathBuf> = std::fs::read_dir("data/inbox")
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.join("READY").is_file())
+                .collect();
+            for event in ready {
+                let profile = std::fs::read_to_string(event.join("READY")).unwrap_or_default();
+                let profile = match profile.trim() {
+                    "" => meridian_tdoa::channel::PROFILE.to_string(),
+                    p => p.to_string(),
+                };
+                let app = inbox_app.clone();
+                let offset = app.config.gps_utc_offset_s;
+                let outcome = tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
+                    let run = || -> anyhow::Result<Value> {
+                        let manifest = meridian_tdoa::sigmf::ingest(
+                            &event,
+                            Path::new("data/captures"),
+                            &profile,
+                            None,
+                            offset,
+                        )?;
+                        let m: Manifest = serde_json::from_slice(&std::fs::read(&manifest)?)?;
+                        Ok(process_ibp(&app.db, &manifest, &m.id)?.1)
+                    };
+                    match run() {
+                        Ok(summary) => {
+                            std::fs::remove_dir_all(&event)?;
+                            Ok(summary)
+                        }
+                        Err(e) => {
+                            // Never retried automatically: kept with the reason for the operator.
+                            let failed = Path::new("data/inbox-failed")
+                                .join(event.file_name().unwrap_or_default());
+                            std::fs::create_dir_all("data/inbox-failed")?;
+                            std::fs::rename(&event, &failed)?;
+                            std::fs::write(failed.join("ERROR.txt"), e.to_string())?;
+                            Err(e)
+                        }
+                    }
+                })
+                .await;
+                match outcome {
+                    Ok(Ok(summary)) => eprintln!("Inbox event ingested: {summary}"),
+                    Ok(Err(e)) => eprintln!("Inbox event rejected: {e}"),
+                    Err(e) => eprintln!("Inbox worker failed: {e}"),
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+        }
+    });
     let retention_app = app.clone();
     tokio::spawn(async move {
         loop {
@@ -1343,6 +1598,12 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/tracks", get(tracks))
         .route("/api/tracks/{key}", get(track_detail))
         .route("/api/receivers/health", get(receiver_health))
+        .route(
+            "/api/detections",
+            post(detections).layer(axum::extract::DefaultBodyLimit::max(262_144)),
+        )
+        .route("/api/clocks", get(clock_state))
+        .route("/api/stream", get(stream))
         .route("/api/replay", post(replay))
         .route("/api/capture", post(start_capture))
         .route("/api/review", post(review))
@@ -1363,6 +1624,7 @@ async fn main() -> anyhow::Result<()> {
                     .expect("SIGTERM handler");
             tokio::select! {_=tokio::signal::ctrl_c()=>(),_=terminate.recv()=>()}
             shutdown_app.stopping.store(true, Ordering::SeqCst);
+            let _ = shutdown_app.events.send(SHUTDOWN_EVENT.into());
             // Let the bounded capture/processing finish. After a forced stop the durable job is recovered as interrupted.
             for _ in 0..180 {
                 if !busy(&shutdown_app) {

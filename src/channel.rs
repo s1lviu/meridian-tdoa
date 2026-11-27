@@ -118,6 +118,10 @@ pub fn analyze(path: &Path) -> Result<Analysis> {
                             / geo::C_KM_S,
                         coherent_s,
                     );
+                    let mut p = p;
+                    let clock = |r: &RxResult| r.receiver.timing_sigma_ns.unwrap_or(0.) / 1000.;
+                    p.sigma_us =
+                        (p.sigma_us.powi(2) + clock(&rx[i]).powi(2) + clock(&rx[j]).powi(2)).sqrt();
                     if p.accepted {
                         rx[i].confirmed = true;
                         rx[j].confirmed = true;
@@ -297,6 +301,7 @@ mod tests {
                 position_uncertainty_m: 0.,
                 file: format!("node{i}.sigmf-meta"),
                 sha256: pipeline::checksum(&crate::sigmf::data_path(&meta)).unwrap(),
+                timing_sigma_ns: None,
             });
         }
         let m = Manifest {
@@ -334,5 +339,90 @@ mod tests {
             est.radius_km
         );
         assert!(err < 10.);
+    }
+}
+
+#[cfg(test)]
+mod ingest_tests {
+    use super::*;
+    use rustfft::num_complex::Complex;
+    #[test]
+    fn sigmf_ingest_builds_a_hashed_manifest_and_feeds_the_channel_pipeline() {
+        let inbox = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let fs = 24_000.;
+        let n = (fs * 8.) as usize;
+        let mut seed = 77u64;
+        let mut u = move || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((seed >> 11) as f64 + 0.5) / (1u64 << 53) as f64
+        };
+        let src: Vec<Complex<f64>> = {
+            let raw: Vec<_> = (0..n + 2000)
+                .map(|_| {
+                    let (a, b) = (u(), u());
+                    Complex::from_polar((-2. * a.ln()).sqrt(), std::f64::consts::TAU * b)
+                })
+                .collect();
+            dsp::bandpass(&raw, fs, -1500., 500., 80.)
+        };
+        let truth = Point {
+            lat: 50.1,
+            lon: 14.4,
+        };
+        for (i, p) in [
+            Point {
+                lat: 51.5,
+                lon: 12.0,
+            },
+            Point {
+                lat: 48.6,
+                lon: 13.0,
+            },
+            Point {
+                lat: 49.4,
+                lon: 17.0,
+            },
+        ]
+        .iter()
+        .enumerate()
+        {
+            let d = geo::distance(truth, *p) / geo::C_KM_S * fs;
+            let x: Vec<Complex<f64>> = (0..n)
+                .map(|k| dsp::sinc_at(&src, 1000. + k as f64 - d) * 0.3)
+                .collect();
+            let anchors = vec![(0u64, "2026-11-27T20:00:00.000000000Z".to_string())];
+            crate::sigmf::write(
+                &inbox.path().join(format!("n{i}.sigmf-meta")),
+                &format!("n{i}"),
+                *p,
+                fs,
+                3.5e6,
+                "gpsdo",
+                30.,
+                &anchors,
+                &x,
+            )
+            .unwrap();
+        }
+        let manifest = crate::sigmf::ingest(inbox.path(), store.path(), PROFILE, None, 18).unwrap();
+        let m: Manifest = serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
+        assert_eq!(m.receivers.len(), 3);
+        assert!(
+            m.receivers
+                .iter()
+                .all(|r| r.timing_sigma_ns == Some(30.) && r.sha256.len() == 64)
+        );
+        let a = analyze(&manifest).unwrap();
+        let e = a
+            .emissions
+            .iter()
+            .find(|e| e.detected)
+            .expect("correlated emission");
+        assert_eq!(e.receivers.iter().filter(|r| r.confirmed).count(), 3);
+        // Three receivers: a correlated, timed emission, but never a unique position.
+        assert!(e.estimate.is_none());
     }
 }

@@ -441,3 +441,103 @@ mod tests {
         assert!(read(&dir.path().join("missing.sigmf-meta")).is_err());
     }
 }
+
+/// Build a manifest for SigMF recordings of one event (one file per receiver) and copy them
+/// into `dest`. `profile`: `correlated_v1` (unknown emitters) or `ft8_v1`.
+pub fn ingest(
+    src: &Path,
+    dest: &Path,
+    profile: &str,
+    center_hz: Option<f64>,
+    gps_utc_offset_s: i64,
+) -> anyhow::Result<std::path::PathBuf> {
+    use crate::model::*;
+    let mut metas: Vec<PathBuf> = std::fs::read_dir(src)?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.to_string_lossy().ends_with(".sigmf-meta"))
+        .collect();
+    metas.sort();
+    ensure!(
+        metas.len() >= 2,
+        "At least two SigMF recordings are needed for a delay"
+    );
+    ensure!(
+        metas.len() <= crate::pipeline::MAX_RECEIVERS,
+        "At most {} receivers per event",
+        crate::pipeline::MAX_RECEIVERS
+    );
+    let recordings: Vec<Recording> = metas.iter().map(|m| read(m)).collect::<Result<_>>()?;
+    let center = center_hz.unwrap_or(recordings[0].frequency_hz);
+    for r in &recordings {
+        ensure!(
+            (r.frequency_hz - center).abs() <= r.sample_rate / 2. - 6000.,
+            "{}: the 12 kHz channel at {center} Hz is outside this recording",
+            r.receiver_id
+        );
+    }
+    let id = format!("ingest-{}", uuid::Uuid::new_v4());
+    let dir = dest.join(&id);
+    std::fs::create_dir_all(&dir)?;
+    let mut receivers = vec![];
+    for (meta, r) in metas.iter().zip(&recordings) {
+        let name = meta.file_name().unwrap();
+        std::fs::copy(meta, dir.join(name))?;
+        let data = data_path(meta);
+        std::fs::copy(&data, dir.join(data.file_name().unwrap()))?;
+        receivers.push(Receiver {
+            id: r.receiver_id.clone(),
+            label: r.hardware.clone().unwrap_or_else(|| r.receiver_id.clone()),
+            independent_device: r.receiver_id.clone(),
+            position: r.position.context("Recording has no core:geolocation")?,
+            position_evidence: Evidence {
+                url: "https://github.com/sigmf/SigMF".into(),
+                note: format!("core:geolocation of the node's own SigMF recording; time source {} (σ {} ns declared).", r.time_source, r.time_sigma_ns),
+            },
+            position_uncertainty_m: 0.,
+            file: name.to_string_lossy().into(),
+            sha256: crate::pipeline::checksum(&dir.join(data.file_name().unwrap()))?,
+            timing_sigma_ns: Some(r.time_sigma_ns),
+        });
+    }
+    let first = recordings
+        .iter()
+        .map(|r| r.epoch_utc as f64 + r.anchors[0].1)
+        .fold(f64::INFINITY, f64::min);
+    let (kind, frequency, iq_center) = match profile {
+        crate::ft8_tdoa::PROFILE => (
+            "amateur_digital",
+            center - crate::ft8_tdoa::IQ_OFFSET_HZ,
+            center,
+        ),
+        crate::channel::PROFILE => ("monitored_channel", center, center),
+        other => anyhow::bail!("Unsupported ingest profile {other}"),
+    };
+    let m = Manifest {
+        id: id.clone(),
+        title: format!("Ingested SigMF · {} receivers", receivers.len()),
+        kind: kind.into(),
+        mode: "live".into(),
+        frequency_hz: frequency,
+        capture_profile: Some(profile.into()),
+        iq_center_hz: Some(iq_center),
+        capture_utc: chrono::DateTime::from_timestamp(first.floor() as i64, 0)
+            .unwrap()
+            .to_rfc3339(),
+        gps_utc_offset_s,
+        provenance: Evidence {
+            url: "https://github.com/sigmf/SigMF".into(),
+            note: format!(
+                "{} SigMF recordings from independent nodes, each with its own GNSS-disciplined time base.",
+                receivers.len()
+            ),
+        },
+        emission_verified: false,
+        identity: None,
+        receivers,
+        rejected_receivers: vec![],
+    };
+    let path = dir.join("manifest.json");
+    crate::store::atomic_json(&path, &m)?;
+    Ok(path)
+}

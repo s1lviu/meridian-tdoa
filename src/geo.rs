@@ -557,6 +557,7 @@ mod tests {
                     position_uncertainty_m: 0.,
                     file: String::new(),
                     sha256: String::new(),
+                    timing_sigma_ns: None,
                 },
                 confirmed: true,
                 used: true,
