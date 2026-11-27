@@ -532,7 +532,18 @@ fn settle_detections(app: &App) {
                 .reference(r.position, &positions, &seen);
             continue;
         }
-        let arrivals = app.clocks.lock().unwrap().corrected(&seen);
+        let disciplined: HashSet<String> = app
+            .config
+            .nodes
+            .iter()
+            .filter(|n| n.disciplined)
+            .map(|n| n.id.clone())
+            .collect();
+        let arrivals = app
+            .clocks
+            .lock()
+            .unwrap()
+            .corrected_with(&seen, &disciplined);
         if arrivals.len() >= 3 {
             stored.push(meridian_tdoa::sync::emission(
                 &signal,

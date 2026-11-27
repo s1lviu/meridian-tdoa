@@ -4,6 +4,14 @@ version = "0.2.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
 
+[[bin]]
+name = "meridian-tdoa"
+path = "src/main.rs"
+
+[[bin]]
+name = "meridian-node"
+path = "src/bin/meridian-node.rs"
+
 [dependencies]
 anyhow = "1"
 axum = "0.8"
@@ -19,7 +27,7 @@ tower-http = { version = "0.6", features = ["fs", "limit", "trace"] }
 geographiclib-rs = "0.2.7"
 libm = "0.2"
 rusqlite = { version = "0.43", features = ["bundled"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "blocking", "json"] }
 uuid = { version = "1", features = ["v4"] }
 
 [build-dependencies]

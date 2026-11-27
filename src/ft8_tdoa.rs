@@ -161,6 +161,73 @@ fn utc(s: i64) -> String {
         .to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
+/// One receiver alone: decode a 15 s slot of 12 kHz IQ (centred `IQ_OFFSET_HZ` above the dial)
+/// and time every decoded message against its rebuilt waveform. Arrival seconds are from the
+/// slot buffer start, in that receiver's own clock. Used by edge nodes (`meridian-node`).
+pub fn time_slot(iq: &[Complex<f64>]) -> Vec<(ft8::Decode, toa::Arrival)> {
+    let mut planner = FftPlanner::new();
+    let spec = spectrum(&mut planner, iq);
+    let found = ft8::decode(&usb_audio(&mut planner, &spec), FS as u32);
+    let freqs: Vec<f64> = (-14..=14).map(|k| k as f64 * 0.25).collect();
+    found
+        .into_iter()
+        .filter_map(|d| {
+            let template = ft8::synthesize_complex(&d.tones, 0., FS_TOA);
+            let max_lag = TOA_SAMPLES.checked_sub(template.len())?;
+            let expect = (d.time_s - ft8::DECODER_LAG_S) * FS_TOA;
+            let half = (ft8::DECODER_TOLERANCE_S + 0.05) * FS_TOA;
+            let lo = (expect - half).floor().max(0.) as usize;
+            let hi = ((expect + half).ceil() as usize).min(max_lag);
+            let noise: Vec<usize> = (0..=max_lag)
+                .filter(|l| (*l as f64 - expect).abs() > 160.)
+                .step_by(3)
+                .collect();
+            let y = baseband(&mut planner, &spec, d.freq_hz - IQ_OFFSET_HZ);
+            let a = toa::matched(&y, &template, FS_TOA, lo, hi, &freqs, SEGMENTS, &noise)?;
+            (a.significance() >= TIMING_SIGMA).then_some((d, a))
+        })
+        .collect()
+}
+
+pub const SLOT_SAMPLES_12K: usize = SLOT_SAMPLES;
+pub const TOA_RATE_HZ: f64 = FS_TOA;
+
+/// Edge-node processing of one SigMF recording centred `IQ_OFFSET_HZ` above an FT8 dial:
+/// arrival-time reports of every decoded message, in the node's own clock (UTC seconds as the
+/// node's time base states them). Signal ids are `ft8-<CALL|payload hex>-<slot>`.
+pub fn node_detections(meta: &Path, node: &str) -> Result<(f64, Vec<crate::sync::Detection>)> {
+    let r = crate::sigmf::read(meta)?;
+    ensure!(
+        r.receiver_id == node,
+        "Recording belongs to {}, not {node}",
+        r.receiver_id
+    );
+    let dial = r.frequency_hz - IQ_OFFSET_HZ;
+    ensure!(
+        crate::bands::name(dial).is_some(),
+        "Recording is not centred on an amateur FT8 sub-band"
+    );
+    let track = r.to_track(FS, 0., r.epoch_utc, 0)?;
+    let (start, end) = (track.start(), track.end());
+    let mut out = vec![];
+    let mut slot = ((r.epoch_utc as f64 + start) / 15.).ceil() as i64 * 15;
+    ft8::reset_hashes();
+    while slot as f64 + 15. <= r.epoch_utc as f64 + end {
+        let iq = track.resample((slot - r.epoch_utc) as f64, FS, SLOT_SAMPLES);
+        for (d, a) in time_slot(&iq) {
+            let id = d.transmitter().unwrap_or_else(|| hex(&d.payload));
+            out.push(crate::sync::Detection {
+                node: node.into(),
+                signal: format!("ft8-{id}-{slot}"),
+                local_s: slot as f64 + a.lag / FS_TOA,
+                sigma_s: (a.lag_sigma / FS_TOA).max(TIMING_FLOOR_US * 1e-6),
+            });
+        }
+        slot += 15;
+    }
+    Ok((dial, out))
+}
+
 pub fn analyze(path: &Path) -> Result<Analysis> {
     let m: Manifest = serde_json::from_slice(&std::fs::read(path)?)?;
     pipeline::validate_manifest(&m)?;
@@ -637,5 +704,137 @@ pub(crate) mod tests {
         );
         assert!(error < 15., "error {error} km");
         assert!(crate::calibration::contains(&est.polygon, truth));
+    }
+}
+
+#[cfg(test)]
+mod node_tests {
+    use super::*;
+    /// GNSS-disciplined edge nodes record FT8 as SigMF at 48 kSPS, decode and time it locally,
+    /// and only arrival times reach the server, which associates and locates the station.
+    #[test]
+    fn edge_nodes_report_ft8_arrivals_that_the_server_locates() {
+        let dir = tempfile::tempdir().unwrap();
+        let truth = Point {
+            lat: 47.0,
+            lon: 10.0,
+        };
+        let sites = [
+            Point {
+                lat: 49.5,
+                lon: 6.0,
+            },
+            Point {
+                lat: 44.8,
+                lon: 7.5,
+            },
+            Point {
+                lat: 45.5,
+                lon: 14.2,
+            },
+            Point {
+                lat: 49.8,
+                lon: 13.5,
+            },
+            Point {
+                lat: 47.6,
+                lon: 8.6,
+            },
+        ];
+        let audio = {
+            let bytes = include_bytes!("../third_party/ft8_lib/test/191111_110130.wav");
+            let i = bytes.windows(4).position(|w| w == b"data").unwrap();
+            bytes[i + 8..]
+                .chunks_exact(2)
+                .map(|s| i16::from_le_bytes([s[0], s[1]]) as f32 / 32768.)
+                .collect::<Vec<_>>()
+        };
+        ft8::reset_hashes();
+        let reference = ft8::decode(&audio, 12000)
+            .into_iter()
+            .find(|d| d.text == "CQ TA6CQ KN70")
+            .unwrap();
+        let fs = 48_000.;
+        let wave = ft8::synthesize_complex(&reference.tones, 900. - IQ_OFFSET_HZ, fs);
+        let slot = 1_795_000_005i64 - 1_795_000_005 % 15 + 15; // a 15 s boundary
+        let start = slot - 3; // recordings begin 3 s before it
+        let mut seed = 17u64;
+        let mut u = move || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((seed >> 11) as f64 + 0.5) / (1u64 << 53) as f64
+        };
+        let mut nodes = vec![];
+        let mut seen = vec![];
+        for (i, p) in sites.iter().enumerate() {
+            let delay = geo::distance(truth, *p) / geo::C_KM_S;
+            let n = (fs * 20.) as usize;
+            let x: Vec<Complex<f64>> = (0..n)
+                .map(|k| {
+                    let t = start as f64 + k as f64 / fs;
+                    let pos = (t - slot as f64 - 0.5 - delay) * fs;
+                    let s = if pos > -40. && pos < wave.len() as f64 + 40. {
+                        crate::dsp::sinc_at(&wave, pos) * 0.05
+                    } else {
+                        Complex::default()
+                    };
+                    let (a, b) = (u(), u());
+                    s + Complex::from_polar(
+                        (-2. * a.ln()).sqrt() * 0.005,
+                        std::f64::consts::TAU * b,
+                    )
+                })
+                .collect();
+            let anchors: Vec<(u64, String)> = (0..20u64)
+                .map(|s| {
+                    (
+                        s * fs as u64,
+                        chrono::DateTime::from_timestamp(start + s as i64, 0)
+                            .unwrap()
+                            .to_rfc3339_opts(SecondsFormat::Nanos, true),
+                    )
+                })
+                .collect();
+            let meta = dir.path().join(format!("node{i}.sigmf-meta"));
+            crate::sigmf::write(
+                &meta,
+                &format!("node{i}"),
+                *p,
+                fs,
+                14_074_000. + IQ_OFFSET_HZ,
+                "gnss_pps",
+                50.,
+                &anchors,
+                &x,
+            )
+            .unwrap();
+            let (dial, detections) = node_detections(&meta, &format!("node{i}")).unwrap();
+            assert_eq!(dial, 14_074_000.);
+            assert_eq!(detections.len(), 1, "node {i}: {detections:?}");
+            seen.extend(detections);
+            nodes.push(crate::model::Node {
+                id: format!("node{i}"),
+                label: format!("node {i}"),
+                position: *p,
+                position_evidence: crate::model::Evidence {
+                    url: "https://example.org".into(),
+                    note: "synthetic".into(),
+                },
+                token_sha256: String::new(),
+                disciplined: true,
+            });
+        }
+        assert!(seen.iter().all(|d| d.signal == format!("ft8-TA6CQ-{slot}")));
+        let disciplined = nodes.iter().map(|n| n.id.clone()).collect();
+        let arrivals = crate::sync::Network::default().corrected_with(&seen, &disciplined);
+        let e = crate::sync::emission(&seen[0].signal, &arrivals, &nodes, 14_074_000., Utc::now());
+        let est = e.estimate.expect("located from five edge reports");
+        let err = geo::distance(est.center, truth);
+        eprintln!(
+            "edge FT8 reports: error {err:.2} km, 95% radius {:.1} km",
+            est.radius_km
+        );
+        assert!(err < 15.);
     }
 }

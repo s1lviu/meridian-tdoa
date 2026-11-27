@@ -244,6 +244,10 @@ pub struct Node {
     pub position_evidence: Evidence,
     /// SHA-256 (hex) of the node's bearer token; the token itself is never stored.
     pub token_sha256: String,
+    /// The node's clock is GNSS-disciplined to UTC (PPS/GPSDO): its reports need no
+    /// reference-emitter synchronization.
+    #[serde(default)]
+    pub disciplined: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

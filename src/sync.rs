@@ -154,14 +154,22 @@ impl Network {
     /// Arrival times of a target emission on the master's time base, with their σ.
     /// Nodes without a synchronized clock are omitted.
     pub fn corrected(&self, seen: &[Detection]) -> Vec<(String, f64, f64)> {
-        let Some(master) = &self.master else {
-            return vec![];
-        };
+        self.corrected_with(seen, &std::collections::HashSet::new())
+    }
+
+    /// As `corrected`, with GNSS-disciplined nodes taken on their own (UTC) time base.
+    pub fn corrected_with(
+        &self,
+        seen: &[Detection],
+        disciplined: &std::collections::HashSet<String>,
+    ) -> Vec<(String, f64, f64)> {
         seen.iter()
             .filter_map(|d| {
-                if &d.node == master {
+                if disciplined.contains(&d.node) || self.master.as_deref() == Some(d.node.as_str())
+                {
                     return Some((d.node.clone(), d.local_s, d.sigma_s));
                 }
+                self.master.as_ref()?;
                 let c = self.clocks.get(&d.node).filter(|c| c.updates >= 3)?;
                 let (offset, sd) = c.at(d.local_s);
                 Some((
