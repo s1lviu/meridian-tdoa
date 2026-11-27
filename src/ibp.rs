@@ -273,6 +273,7 @@ pub fn analyze(path: &Path) -> Result<Analysis> {
                         profile: PROFILE.into(),
                         three_receivers: protocol::comparison(&e),
                         cw: proof.clone(),
+                        ft8: None,
                     });
                 }
                 emissions.push((e,serde_json::json!({"slot_utc":utc(slot),"scheduled_callsign":call,"receivers":proof})));

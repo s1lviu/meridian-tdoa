@@ -1,6 +1,68 @@
 use crate::model::Pair;
 use rustfft::{FftPlanner, num_complex::Complex};
 
+const SINC_HALF: usize = 16;
+const SINC_PHASES: usize = 1024;
+const KAISER_BETA: f64 = 7.86; // Kaiser: β = 0.1102 (A − 8.7) for A = 80 dB
+
+fn bessel_i0(x: f64) -> f64 {
+    // Power series; converges quickly for the window's argument range (≤ β).
+    let (mut sum, mut term, mut k) = (1., 1., 1.);
+    while term > 1e-17 * sum {
+        term *= (x / (2. * k)).powi(2);
+        sum += term;
+        k += 1.;
+    }
+    sum
+}
+
+static SINC_TABLE: std::sync::LazyLock<Vec<f64>> = std::sync::LazyLock::new(|| {
+    // tap(j, phase) for j in -H+1..=H and fractional phase in [0,1)
+    let mut table = vec![0.; (SINC_PHASES + 1) * 2 * SINC_HALF];
+    let norm = bessel_i0(KAISER_BETA);
+    for p in 0..=SINC_PHASES {
+        let frac = p as f64 / SINC_PHASES as f64;
+        for (idx, j) in (-(SINC_HALF as i64) + 1..=SINC_HALF as i64).enumerate() {
+            let u = j as f64 - frac;
+            let sinc = if u.abs() < 1e-12 {
+                1.
+            } else {
+                (std::f64::consts::PI * u).sin() / (std::f64::consts::PI * u)
+            };
+            let r = u / SINC_HALF as f64;
+            let w = if r.abs() >= 1. {
+                0.
+            } else {
+                bessel_i0(KAISER_BETA * (1. - r * r).sqrt()) / norm
+            };
+            table[p * 2 * SINC_HALF + idx] = sinc * w;
+        }
+    }
+    table
+});
+
+/// Band-limited value of a uniformly sampled stream at fractional index `x` (zero outside).
+pub fn sinc_at(x: &[Complex<f64>], pos: f64) -> Complex<f64> {
+    let base = pos.floor();
+    let frac = pos - base;
+    let phase = frac * SINC_PHASES as f64;
+    let p0 = phase.floor() as usize;
+    let w1 = phase - p0 as f64;
+    let p1 = (p0 + 1).min(SINC_PHASES);
+    let (t0, t1) = (
+        &SINC_TABLE[p0 * 2 * SINC_HALF..],
+        &SINC_TABLE[p1 * 2 * SINC_HALF..],
+    );
+    let mut acc = Complex::new(0., 0.);
+    for idx in 0..2 * SINC_HALF {
+        let j = base as i64 + idx as i64 - SINC_HALF as i64 + 1;
+        if j >= 0 && (j as usize) < x.len() {
+            acc += x[j as usize] * (t0[idx] * (1. - w1) + t1[idx] * w1);
+        }
+    }
+    acc
+}
+
 pub fn median(x: &[f64]) -> f64 {
     let mut v = x.to_vec();
     v.sort_by(f64::total_cmp);
@@ -172,6 +234,25 @@ pub fn correlate(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn sinc_interpolation_is_band_limited_where_linear_is_not() {
+        // 4.5 kHz complex tone sampled at 12003.7 Hz, read back at arbitrary fractional times.
+        let (fs, f) = (12003.7, 4500.);
+        let x: Vec<_> = (0..4000)
+            .map(|n| Complex::from_polar(1., std::f64::consts::TAU * f * n as f64 / fs))
+            .collect();
+        let (mut err, mut lin) = (0f64, 0f64);
+        for i in 0..1000 {
+            let pos = 1000. + i as f64 * 1.37301;
+            let exact = Complex::from_polar(1., std::f64::consts::TAU * f * pos / fs);
+            err = err.max((sinc_at(&x, pos) - exact).norm());
+            let j = pos.floor() as usize;
+            let a = pos - j as f64;
+            lin = lin.max((x[j] * (1. - a) + x[j + 1] * a - exact).norm());
+        }
+        assert!(err < 1e-3, "sinc error {err}");
+        assert!(lin > 0.1, "linear error {lin}");
+    }
     #[test]
     fn recovers_delay_and_rejects_a_tone() {
         let mut seed = 123u64;

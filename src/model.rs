@@ -124,6 +124,9 @@ pub struct VerifiedReference {
     pub three_receivers: Option<ReceiverComparison>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cw: Vec<crate::ibp::ReceiverEvidence>,
+    /// Decoded FT8 content and per-receiver arrival evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ft8: Option<crate::ft8_tdoa::Evidence>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -209,6 +212,33 @@ pub struct Config {
     pub monitor: Option<MonitorConfig>,
     #[serde(default)]
     pub retention: crate::retention::Policy,
+    #[serde(default)]
+    pub receivers: ReceiverPolicy,
+    /// Capture windows processed concurrently (each on disjoint receivers).
+    #[serde(default = "two")]
+    pub max_parallel_jobs: usize,
+}
+
+fn two() -> usize {
+    2
+}
+
+/// Fair use of volunteer receivers: a connection-time budget per receiver and UTC day,
+/// a minimum gap between connections, and back-off after failures or explicit refusals.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReceiverPolicy {
+    pub daily_minutes: f64,
+    pub min_gap_s: u64,
+}
+
+impl Default for ReceiverPolicy {
+    fn default() -> Self {
+        ReceiverPolicy {
+            daily_minutes: 60.,
+            min_gap_s: 60,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

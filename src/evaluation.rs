@@ -210,6 +210,7 @@ mod tests {
             profile: ibp::PROFILE.into(),
             cw: vec![],
             three_receivers: None,
+            ft8: None,
         });
         e.identity = Some(Identity {
             callsign: "OH2B".into(),

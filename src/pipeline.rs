@@ -32,19 +32,19 @@ pub fn validate_manifest(m: &Manifest) -> Result<()> {
         [
             "public_beacon",
             "participating_amateur",
-            "public_time_reference"
+            "public_time_reference",
+            "amateur_digital",
+            "monitored_channel"
         ]
         .contains(&m.kind.as_str()),
         "Target is not eligible"
     );
-    let minimum_receivers = if m.capture_profile.as_deref() == Some(crate::ibp::PROFILE)
-        && m.kind == "public_beacon"
-        && m.mode == "live"
-    {
-        1
-    } else {
-        3
-    };
+    let single_receiver_ok = m.mode == "live"
+        && ((m.capture_profile.as_deref() == Some(crate::ibp::PROFILE)
+            && m.kind == "public_beacon")
+            || (m.capture_profile.as_deref() == Some(crate::ft8_tdoa::PROFILE)
+                && m.kind == "amateur_digital"));
+    let minimum_receivers = if single_receiver_ok { 1 } else { 3 };
     ensure!(
         (minimum_receivers..=8).contains(&m.receivers.len()),
         "Invalid receiver count for this capture profile"

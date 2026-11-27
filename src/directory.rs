@@ -194,6 +194,61 @@ pub struct Directory {
 impl Directory {
     /// Visit every eligible receiver as an anchor, alternating geographic cells.
     /// Its surrounding network depends only on receiver metadata and the channel.
+    /// Rotation round whose anchor is the eligible receiver nearest to `p` (receiver geography only).
+    pub fn anchor_near(
+        &self,
+        center: f64,
+        p: crate::model::Point,
+        reserved: &std::collections::HashSet<String>,
+    ) -> Result<usize> {
+        let order = self.anchor_order(center, reserved)?;
+        let (i, _) = order
+            .iter()
+            .enumerate()
+            .min_by(|a, b| {
+                let d = |r: &Entry| {
+                    let [lat, lon] = r.gps.unwrap();
+                    crate::geo::distance(p, crate::model::Point { lat, lon })
+                };
+                d(a.1).total_cmp(&d(b.1))
+            })
+            .ok_or_else(|| anyhow::anyhow!("No eligible receiver"))?;
+        Ok(i)
+    }
+
+    fn anchor_order(
+        &self,
+        center: f64,
+        reserved: &std::collections::HashSet<String>,
+    ) -> Result<Vec<&Entry>> {
+        use std::collections::{BTreeMap, HashSet};
+        let mut unique = HashSet::new();
+        let mut candidates: Vec<_> = self
+            .receivers
+            .iter()
+            .filter(|r| !reserved.contains(&r.id) && r.covers(center) && unique.insert(&r.id))
+            .collect();
+        ensure!(
+            candidates.len() >= 3,
+            "Fewer than three eligible directory receivers on this channel"
+        );
+        candidates.sort_by_key(|r| &r.id);
+        let mut cells = BTreeMap::<(i16, i16), Vec<&Entry>>::new();
+        for &r in &candidates {
+            let [lat, lon] = r.gps.unwrap();
+            cells
+                .entry(((lat / 25.).floor() as i16, (lon / 40.).floor() as i16))
+                .or_default()
+                .push(r);
+        }
+        let mut order: Vec<_> = cells
+            .values()
+            .flat_map(|cell| cell.iter().enumerate().map(|(i, r)| (i, *r)))
+            .collect();
+        order.sort_by_key(|(depth, _)| *depth);
+        Ok(order.into_iter().map(|(_, r)| r).collect())
+    }
+
     pub fn network(
         &self,
         center: f64,
@@ -210,36 +265,13 @@ impl Directory {
         reserved: &std::collections::HashSet<String>,
     ) -> Result<Vec<crate::model::LiveSource>> {
         use crate::{geo, model::Point};
-        use std::collections::{BTreeMap, HashSet};
-        let mut unique = HashSet::new();
-        let mut candidates: Vec<_> = self
-            .receivers
-            .iter()
-            .filter(|r| !reserved.contains(&r.id) && r.covers(center) && unique.insert(&r.id))
-            .collect();
-        ensure!(
-            candidates.len() >= 3,
-            "Fewer than three eligible directory receivers on this channel"
-        );
-        candidates.sort_by_key(|r| &r.id);
-        let mut cells = BTreeMap::<(i16, i16), Vec<&Entry>>::new();
+        let order = self.anchor_order(center, reserved)?;
         let point = |r: &Entry| {
             let [lat, lon] = r.gps.unwrap();
             Point { lat, lon }
         };
-        for &r in &candidates {
-            let p = point(r);
-            cells
-                .entry(((p.lat / 25.).floor() as i16, (p.lon / 40.).floor() as i16))
-                .or_default()
-                .push(r);
-        }
-        let mut order: Vec<_> = cells
-            .values()
-            .flat_map(|cell| cell.iter().enumerate().map(|(i, r)| (i, *r)))
-            .collect();
-        order.sort_by_key(|(depth, _)| *depth);
-        let first = order[round % order.len()].1;
+        let mut candidates = order.clone();
+        let first = order[round % order.len()];
         let anchor = point(first);
         candidates.sort_by(|a, b| {
             geo::distance(point(a), anchor).total_cmp(&geo::distance(point(b), anchor))

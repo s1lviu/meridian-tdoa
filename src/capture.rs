@@ -37,11 +37,13 @@ fn recorder_python(configured: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn iq_center(target: &Target) -> f64 {
-    if target.verification.as_deref() == Some(crate::ibp::PROFILE) {
-        target.frequency_hz - 700.0
-    } else {
-        target.frequency_hz
+/// IQ centre frequency for a target: IBP channels sit 700 Hz above the centre, the FT8
+/// sub-band 0–3 kHz above the dial sits around a centre 1.5 kHz above it.
+pub fn iq_center(target: &Target) -> f64 {
+    match target.verification.as_deref() {
+        Some(crate::ibp::PROFILE) => target.frequency_hz - 700.0,
+        Some(crate::ft8_tdoa::PROFILE) => target.frequency_hz + crate::ft8_tdoa::IQ_OFFSET_HZ,
+        _ => target.frequency_hz,
     }
 }
 
@@ -72,6 +74,12 @@ pub fn authorize(config: &Config, target: &Target) -> Result<Vec<LiveSource>> {
             "IBP capture requires a published beacon channel"
         );
     }
+    if target.verification.as_deref() == Some(crate::ft8_tdoa::PROFILE) {
+        ensure!(
+            target.kind == "amateur_digital" && crate::bands::name(target.frequency_hz).is_some(),
+            "FT8 capture requires a dial frequency inside an amateur band"
+        );
+    }
     ensure!(
         config.live_enabled,
         "Live capture is disabled in the configuration"
@@ -80,7 +88,9 @@ pub fn authorize(config: &Config, target: &Target) -> Result<Vec<LiveSource>> {
         [
             "public_beacon",
             "participating_amateur",
-            "public_time_reference"
+            "public_time_reference",
+            "amateur_digital",
+            "monitored_channel"
         ]
         .contains(&target.kind.as_str())
             && valid_evidence(&target.eligibility_evidence),
@@ -296,6 +306,84 @@ async fn probe(
     anyhow::bail!("Too many /status redirects")
 }
 
+/// What one receiver did during a capture attempt, for fair-use accounting.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ReceiverOutcome {
+    pub id: String,
+    pub ok: bool,
+    pub reason: Option<String>,
+    /// Channel time actually used on the receiver.
+    pub connected_s: f64,
+    /// Minimum block requested by the receiver's own refusal, seconds.
+    pub block_s: f64,
+}
+
+/// Outcomes of a capture directory: preflight errors, IQ delivered, and receiver refusals
+/// reported by KiwiClient (per-IP time limit, busy, down, bad password).
+pub fn outcomes(dir: &Path, duration_s: u64) -> Vec<ReceiverOutcome> {
+    let read = |name: &str| -> Vec<Value> {
+        std::fs::read(dir.join(name))
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default()
+    };
+    let mut out = vec![];
+    for c in read("source-checks.json") {
+        if let Some(err) = c["error"].as_str() {
+            out.push(ReceiverOutcome {
+                id: c["source"]["id"].as_str().unwrap_or_default().into(),
+                ok: false,
+                reason: Some(format!("Preflight: {err}")),
+                connected_s: 0.,
+                block_s: 0.,
+            });
+        }
+    }
+    for c in read("capture-outcomes.json") {
+        let id = c["receiver"].as_str().unwrap_or_default().to_string();
+        if c["captured"] == true {
+            out.push(ReceiverOutcome {
+                id,
+                ok: true,
+                reason: None,
+                connected_s: duration_s as f64,
+                block_s: 0.,
+            });
+            continue;
+        }
+        let log = std::fs::read_to_string(dir.join(format!("{id}.log"))).unwrap_or_default();
+        let refusal = log
+            .lines()
+            .find_map(|l| l.strip_prefix("MERIDIAN-REFUSAL "))
+            .map(|r| r.split_once(' ').map_or((r, ""), |(k, v)| (k, v)));
+        let (reason, block_s) = match refusal {
+            Some(("ip_limit", v)) => (
+                format!(
+                    "Receiver per-IP time limit reached ({} min per 24 h)",
+                    v.split("%2c").next().unwrap_or("?")
+                ),
+                86_400.,
+            ),
+            Some(("too_busy", _)) => ("All receiver channels busy".into(), 600.),
+            Some(("down", _)) => ("Receiver reports it is down".into(), 3600.),
+            Some(("badp", _)) => (
+                "Receiver requires a password for these channels".into(),
+                86_400.,
+            ),
+            Some((k, v)) => (format!("Receiver refused the connection ({k} {v})"), 600.),
+            None => (c["error"].as_str().unwrap_or("No IQ received").into(), 0.),
+        };
+        out.push(ReceiverOutcome {
+            id,
+            ok: false,
+            reason: Some(reason),
+            connected_s: 0.,
+            block_s,
+        });
+    }
+    out
+}
+
 pub fn last_attempt(data_dir: &Path) -> Result<Option<DateTime<Utc>>> {
     #[derive(serde::Deserialize)]
     struct Attempt {
@@ -313,7 +401,15 @@ pub struct Capture {
     target: Target,
     sources: Vec<LiveSource>,
     directory: PathBuf,
-    _window: std::sync::Arc<std::fs::File>,
+}
+
+impl Capture {
+    pub fn receiver_ids(&self) -> Vec<String> {
+        self.sources.iter().map(|s| s.id.clone()).collect()
+    }
+    pub fn target(&self) -> &Target {
+        &self.target
+    }
 }
 
 /// Reserve storage and the shared cooldown once before any receiver is contacted.
@@ -332,16 +428,15 @@ pub fn reserve_window(plans: Vec<(Config, Target)>, data_dir: &Path) -> Result<V
         authorized.push((config, target, sources));
     }
     std::fs::create_dir_all(data_dir)?;
-    let window = std::sync::Arc::new(
-        std::fs::File::options()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(data_dir.join(".capture-window.lock"))?,
-    );
+    // The lock covers only the quota decision; windows on disjoint receivers then run in parallel.
+    let window = std::fs::File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(data_dir.join(".capture-window.lock"))?;
     window
-        .try_lock()
+        .lock()
         .context("Could not reserve the IQ archive for this capture window")?;
     let quota = std::env::var("MERIDIAN_CAPTURE_QUOTA_BYTES")
         .ok()
@@ -354,14 +449,11 @@ pub fn reserve_window(plans: Vec<(Config, Target)>, data_dir: &Path) -> Result<V
     {
         return Err(std::io::Error::new(std::io::ErrorKind::StorageFull, e.to_string()).into());
     }
-    let cooldown = data_dir.join("last-attempt.json");
-    if let Some(at) = last_attempt(data_dir)? {
-        ensure!(
-            Utc::now().signed_duration_since(at).num_seconds() >= 60,
-            "At least 60 s between capture attempts; no automatic retries"
-        );
-    }
-    crate::store::atomic_json(&cooldown, &json!({"utc":Utc::now().to_rfc3339()}))?;
+    // Per-receiver gaps and budgets replace a global cooldown (see `ReceiverPolicy`).
+    crate::store::atomic_json(
+        &data_dir.join("last-attempt.json"),
+        &json!({"utc":Utc::now().to_rfc3339()}),
+    )?;
     Ok(authorized
         .into_iter()
         .map(|(config, target, sources)| Capture {
@@ -369,7 +461,6 @@ pub fn reserve_window(plans: Vec<(Config, Target)>, data_dir: &Path) -> Result<V
             target,
             sources,
             directory: data_dir.to_owned(),
-            _window: window.clone(),
         })
         .collect())
 }
@@ -476,7 +567,7 @@ pub async fn record(capture: Capture) -> Result<PathBuf> {
                         "--socket-timeout",
                         "8",
                         "--user",
-                        "Meridian-TDoA public beacon measurement",
+                        "Meridian-TDoA measurement",
                         "--quiet",
                     ])
                     .arg("--dir")

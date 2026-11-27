@@ -173,6 +173,7 @@ pub fn reference_view(e: &Emission, capture_dir: &Path) -> Option<VerifiedRefere
         profile: proof.profile,
         three_receivers: comparison(e),
         cw: vec![],
+        ft8: None,
     })
 }
 

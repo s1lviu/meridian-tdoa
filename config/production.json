@@ -3,14 +3,14 @@
   "live_enabled": true,
   "monitor": {
     "target_id": "dcf77-validation",
-    "interval_s": 73,
     "additional_target_ids": [
-      "ibp-20m",
-      "ibp-17m",
-      "ibp-15m",
-      "ibp-12m",
-      "ibp-10m"
+      "ft8-20m",
+      "ft8-40m",
+      "ft8-30m",
+      "ft8-17m",
+      "ft8-15m"
     ],
+    "interval_s": 60,
     "directory_receivers": 8,
     "parallel_bands": 2
   },
@@ -311,6 +311,96 @@
       ],
       "duration_s": 30,
       "verification": "ncdxf_cw_v1"
+    },
+    {
+      "id": "ft8-40m",
+      "kind": "amateur_digital",
+      "frequency_hz": 7074000,
+      "eligibility_evidence": {
+        "url": "https://sourceforge.net/p/wsjt/wsjtx/ci/master/tree/models/FrequencyList.cpp",
+        "note": "WSJT-X default FT8 dial frequency 7074000 Hz for all IARU regions (models/FrequencyList.cpp). Each station is identified only from a message decoded in this capture's own IQ; its sent locator is kept for post-hoc evaluation only."
+      },
+      "source_ids": [
+        "f82e0c018380",
+        "00aafd2d3947",
+        "147f0fdf7a94",
+        "f82e0c136d0e",
+        "0cb2b7d6cd86"
+      ],
+      "duration_s": 30,
+      "verification": "ft8_v1"
+    },
+    {
+      "id": "ft8-30m",
+      "kind": "amateur_digital",
+      "frequency_hz": 10136000,
+      "eligibility_evidence": {
+        "url": "https://sourceforge.net/p/wsjt/wsjtx/ci/master/tree/models/FrequencyList.cpp",
+        "note": "WSJT-X default FT8 dial frequency 10136000 Hz for all IARU regions (models/FrequencyList.cpp). Each station is identified only from a message decoded in this capture's own IQ; its sent locator is kept for post-hoc evaluation only."
+      },
+      "source_ids": [
+        "f82e0c018380",
+        "00aafd2d3947",
+        "147f0fdf7a94",
+        "f82e0c136d0e",
+        "0cb2b7d6cd86"
+      ],
+      "duration_s": 30,
+      "verification": "ft8_v1"
+    },
+    {
+      "id": "ft8-20m",
+      "kind": "amateur_digital",
+      "frequency_hz": 14074000,
+      "eligibility_evidence": {
+        "url": "https://sourceforge.net/p/wsjt/wsjtx/ci/master/tree/models/FrequencyList.cpp",
+        "note": "WSJT-X default FT8 dial frequency 14074000 Hz for all IARU regions (models/FrequencyList.cpp). Each station is identified only from a message decoded in this capture's own IQ; its sent locator is kept for post-hoc evaluation only."
+      },
+      "source_ids": [
+        "f82e0c018380",
+        "00aafd2d3947",
+        "147f0fdf7a94",
+        "f82e0c136d0e",
+        "0cb2b7d6cd86"
+      ],
+      "duration_s": 30,
+      "verification": "ft8_v1"
+    },
+    {
+      "id": "ft8-17m",
+      "kind": "amateur_digital",
+      "frequency_hz": 18100000,
+      "eligibility_evidence": {
+        "url": "https://sourceforge.net/p/wsjt/wsjtx/ci/master/tree/models/FrequencyList.cpp",
+        "note": "WSJT-X default FT8 dial frequency 18100000 Hz for all IARU regions (models/FrequencyList.cpp). Each station is identified only from a message decoded in this capture's own IQ; its sent locator is kept for post-hoc evaluation only."
+      },
+      "source_ids": [
+        "f82e0c018380",
+        "00aafd2d3947",
+        "147f0fdf7a94",
+        "f82e0c136d0e",
+        "0cb2b7d6cd86"
+      ],
+      "duration_s": 30,
+      "verification": "ft8_v1"
+    },
+    {
+      "id": "ft8-15m",
+      "kind": "amateur_digital",
+      "frequency_hz": 21074000,
+      "eligibility_evidence": {
+        "url": "https://sourceforge.net/p/wsjt/wsjtx/ci/master/tree/models/FrequencyList.cpp",
+        "note": "WSJT-X default FT8 dial frequency 21074000 Hz for all IARU regions (models/FrequencyList.cpp). Each station is identified only from a message decoded in this capture's own IQ; its sent locator is kept for post-hoc evaluation only."
+      },
+      "source_ids": [
+        "f82e0c018380",
+        "00aafd2d3947",
+        "147f0fdf7a94",
+        "f82e0c136d0e",
+        "0cb2b7d6cd86"
+      ],
+      "duration_s": 30,
+      "verification": "ft8_v1"
     }
   ],
   "gps_offset_valid_until_utc": "2027-01-01T00:00:00Z"

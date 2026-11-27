@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 use meridian_tdoa::{
     bands, capture,
     db::{self, Db},
-    directory, geo, ibp,
+    directory, ft8_tdoa, geo, ibp,
     model::*,
     pipeline, protocol, retention, store,
 };
@@ -32,7 +32,10 @@ struct App {
     config: Arc<Config>,
     db: Arc<Db>,
     persistence_failures: Arc<Mutex<HashSet<String>>>,
-    busy: Arc<AtomicBool>,
+    /// Concurrent jobs (capture windows, reprocessing); each holds one permit.
+    workers: Arc<tokio::sync::Semaphore>,
+    /// Receivers currently connected by an in-flight capture window.
+    leases: Arc<Mutex<HashSet<String>>>,
     datasets: Arc<Vec<(Manifest, PathBuf)>>,
     token: Arc<Option<String>>,
     directory: Arc<RwLock<Option<directory::Directory>>>,
@@ -70,7 +73,7 @@ async fn ready(State(app): State<App>) -> impl IntoResponse {
         (
             StatusCode::OK,
             Json(
-                json!({"status":"ready","version":env!("CARGO_PKG_VERSION"),"busy":app.busy.load(Ordering::SeqCst)}),
+                json!({"status":"ready","version":env!("CARGO_PKG_VERSION"),"busy":busy(&app),"free_workers":app.workers.available_permits()}),
             ),
         )
     }
@@ -397,16 +400,13 @@ fn pending_captures() -> Vec<Manifest> {
         .filter_map(|e| e.ok())
         .filter_map(|e| std::fs::read(e.path().join("manifest.json")).ok())
         .filter_map(|v| serde_json::from_slice::<Manifest>(&v).ok())
-        .filter(|m| {
-            !m.emission_verified
-                && m.capture_profile.as_deref() != Some(meridian_tdoa::ibp::PROFILE)
-        })
+        .filter(|m| !m.emission_verified && !slot_profile(m))
         .collect()
 }
 
 async fn info(State(app): State<App>) -> Json<Value> {
     Json(
-        json!({"name":"Meridian","version":env!("CARGO_PKG_VERSION"),"live_enabled":app.config.live_enabled,"band_ranges_mhz":bands::BANDS,"admin_configured":app.token.is_some(),"sources":app.config.sources,"targets":app.config.targets,"pending_captures":pending_captures(),"busy":app.busy.load(Ordering::SeqCst),"latest_live":app.db.latest_live_start().ok().flatten().and_then(DateTime::from_timestamp_millis),"datasets":app.datasets.iter().map(|(m,_)|m).collect::<Vec<_>>(),"policy":"Public beacons, participating stations and the public DCF77 time reference for commissioning. Identity is not inferred from frequency or position."}),
+        json!({"name":"Meridian","version":env!("CARGO_PKG_VERSION"),"live_enabled":app.config.live_enabled,"band_ranges_mhz":bands::BANDS,"admin_configured":app.token.is_some(),"sources":app.config.sources,"targets":app.config.targets,"pending_captures":pending_captures(),"busy":busy(&app),"latest_live":app.db.latest_live_start().ok().flatten().and_then(DateTime::from_timestamp_millis),"datasets":app.datasets.iter().map(|(m,_)|m).collect::<Vec<_>>(),"policy":"Public beacons, participating stations and the public DCF77 time reference for commissioning. Identity is not inferred from frequency or position."}),
     )
 }
 #[derive(Default, Deserialize)]
@@ -474,11 +474,10 @@ struct ReplayRequest {
     #[serde(default)]
     force: bool,
 }
-struct WorkGuard(Arc<AtomicBool>);
-impl Drop for WorkGuard {
-    fn drop(&mut self) {
-        self.0.store(false, Ordering::SeqCst);
-    }
+type WorkGuard = tokio::sync::OwnedSemaphorePermit;
+
+fn busy(app: &App) -> bool {
+    app.workers.available_permits() < app.config.max_parallel_jobs.max(1)
 }
 
 fn reserve_worker(app: &App) -> Result<WorkGuard, Error> {
@@ -488,17 +487,11 @@ fn reserve_worker(app: &App) -> Result<WorkGuard, Error> {
             "Service is stopping".into(),
         ));
     }
-    if app
-        .busy
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
-        return Err(Error(
-            StatusCode::CONFLICT,
-            "A job is already running".into(),
-        ));
-    }
-    let guard = WorkGuard(app.busy.clone());
+    let guard = app
+        .workers
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| Error(StatusCode::CONFLICT, "Every worker is busy".into()))?;
     if app.stopping.load(Ordering::SeqCst) {
         return Err(Error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -555,17 +548,43 @@ fn retire_capture(app: &App, manifest: &Path, verified: bool) {
         eprintln!("IQ retention sweep failed: {e}");
     }
 }
+/// Captures analysed slot by slot (one observation per transmission) rather than as one emission.
+fn slot_profile(m: &Manifest) -> bool {
+    matches!(
+        m.capture_profile.as_deref(),
+        Some(ibp::PROFILE) | Some(ft8_tdoa::PROFILE)
+    )
+}
 fn process_ibp(db: &Db, path: &Path, capture_id: &str) -> anyhow::Result<(Vec<Emission>, Value)> {
-    let analysis = ibp::analyze(path)?;
-    db.replace_dataset(capture_id, &analysis.emissions)?;
-    let summary = analysis.summary(capture_id);
-    Ok((analysis.emissions, summary))
+    let m: Manifest = serde_json::from_slice(&std::fs::read(path)?)?;
+    let (emissions, summary) = if m.capture_profile.as_deref() == Some(ft8_tdoa::PROFILE) {
+        let a = ft8_tdoa::analyze(path)?;
+        let s = a.summary(capture_id);
+        (a.emissions, s)
+    } else {
+        let a = ibp::analyze(path)?;
+        let s = a.summary(capture_id);
+        (a.emissions, s)
+    };
+    db.replace_dataset(capture_id, &emissions)?;
+    Ok((emissions, summary))
+}
+/// Raw IQ worth keeping: a verified callsign (IBP) or a transmission timed at two receivers (FT8).
+fn worth_keeping(rows: &[Emission]) -> bool {
+    rows.iter().any(|e| {
+        e.identity.is_some()
+            && (e
+                .reference
+                .as_ref()
+                .is_some_and(|r| r.profile == ibp::PROFILE)
+                || e.receivers.iter().filter(|r| r.confirmed).count() >= 2)
+    })
 }
 async fn finish(app: App, id: String, path: Result<PathBuf, anyhow::Error>, fault: Option<String>) {
     if let Ok(p) = &path {
         if let Ok(bytes) = std::fs::read(p) {
             if let Ok(m) = serde_json::from_slice::<Manifest>(&bytes) {
-                if m.capture_profile.as_deref() == Some(ibp::PROFILE) {
+                if slot_profile(&m) {
                     let file = p.clone();
                     let capture = m.id.clone();
                     let db = app.db.clone();
@@ -576,7 +595,7 @@ async fn finish(app: App, id: String, path: Result<PathBuf, anyhow::Error>, faul
                             .and_then(|v| v);
                     let mut value = match result {
                         Ok((rows, summary)) => {
-                            retire_capture(&app, p, rows.iter().any(|e| e.identity.is_some()));
+                            retire_capture(&app, p, worth_keeping(&rows));
                             summary
                         }
                         Err(err) => {
@@ -772,6 +791,12 @@ async fn start_capture(
     tokio::spawn(async move {
         let _guard = guard;
         let result = capture::capture(&config, &target, Path::new("data/captures")).await;
+        if let Ok(manifest) = &result {
+            app.db.account(
+                manifest.parent().unwrap_or(Path::new(".")),
+                target.duration_s,
+            );
+        }
         finish(app, job_id, result, None).await;
     });
     Ok(Json(json!({"job_id":id})))
@@ -822,9 +847,9 @@ async fn review(
     if m.mode != "live" || m.id != r.capture_id {
         return Err(bad("Invalid capture"));
     }
-    if m.capture_profile.as_deref() == Some(meridian_tdoa::ibp::PROFILE) {
+    if slot_profile(&m) {
         return Err(bad(
-            "Shared IBP captures are verified per ten-second transmission",
+            "Slot-profile captures (IBP, FT8) are verified per transmission",
         ));
     }
     m.provenance = r.evidence;
@@ -932,7 +957,7 @@ async fn main() -> anyhow::Result<()> {
             .get(2)
             .ok_or_else(|| anyhow::anyhow!("process MANIFEST [FAULT_RECEIVER]"))?;
         let m: Manifest = serde_json::from_slice(&std::fs::read(path)?)?;
-        if m.capture_profile.as_deref() == Some(ibp::PROFILE) {
+        if slot_profile(&m) {
             anyhow::ensure!(
                 args.get(3).is_none(),
                 "Fault injection is available for replays"
@@ -955,12 +980,76 @@ async fn main() -> anyhow::Result<()> {
         &json!({"checked_at":Utc::now().to_rfc3339()}),
     )?;
     if args.get(1).is_some_and(|v| v == "capture") {
-        let target = config
+        // capture TARGET_ID [--directory N [--near LAT,LON]]
+        let mut target = config
             .targets
             .iter()
             .find(|t| Some(&t.id) == args.get(2))
-            .ok_or_else(|| anyhow::anyhow!("capture TARGET_ID (from MERIDIAN_CONFIG)"))?;
-        let manifest = capture::capture(&config, target, Path::new("data/captures")).await?;
+            .cloned()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "capture TARGET_ID [--sources ID,… | --directory N [--near LAT,LON]]"
+                )
+            })?;
+        let mut cfg = config.clone();
+        let flag = |name: &str| {
+            args.iter()
+                .position(|a| a == name)
+                .and_then(|i| args.get(i + 1))
+        };
+        if let Some(ids) = flag("--sources") {
+            let d = directory::load(Path::new("data/state/directory.json"))?;
+            cfg.sources = ids
+                .split(',')
+                .map(|id| {
+                    d.receivers
+                        .iter()
+                        .find(|r| r.id == id)
+                        .ok_or_else(|| anyhow::anyhow!("{id} is not in the directory"))?
+                        .source(&d.fetched_at)
+                })
+                .collect::<anyhow::Result<_>>()?;
+            target.source_ids = cfg.sources.iter().map(|s| s.id.clone()).collect();
+        } else if let Some(n) = flag("--directory") {
+            let d = directory::load(Path::new("data/state/directory.json"))?;
+            let n: usize = n.parse()?;
+            let center = capture::iq_center(&target);
+            let excluded = Db::open(Path::new("data/meridian.sqlite"))?.unusable_receivers(
+                Utc::now().timestamp_millis(),
+                &cfg.receivers,
+                target.duration_s as f64,
+            )?;
+            let round = match flag("--near") {
+                Some(p) => {
+                    let (lat, lon) = p
+                        .split_once(',')
+                        .ok_or_else(|| anyhow::anyhow!("--near LAT,LON"))?;
+                    d.anchor_near(
+                        center,
+                        Point {
+                            lat: lat.parse()?,
+                            lon: lon.parse()?,
+                        },
+                        &excluded,
+                    )?
+                }
+                None => 0,
+            };
+            cfg.sources = d.network_excluding(center, round, n, &excluded)?;
+            target.source_ids = cfg.sources.iter().map(|s| s.id.clone()).collect();
+        }
+        let result = capture::capture(&cfg, &target, Path::new("data/captures")).await;
+        let db = Db::open(Path::new("data/meridian.sqlite"))?;
+        // Account even for a failed attempt: the newest capture directory holds the outcomes.
+        if let Some(dir) = std::fs::read_dir("data/captures")?
+            .flatten()
+            .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+            .max()
+            .map(|(_, p)| p)
+        {
+            db.account(&dir, target.duration_s);
+        }
+        let manifest = result?;
         println!("{}", manifest.display());
         return Ok(());
     }
@@ -986,7 +1075,7 @@ async fn main() -> anyhow::Result<()> {
             else {
                 continue;
             };
-            if m.capture_profile.as_deref() != Some(ibp::PROFILE)
+            if !slot_profile(&m)
                 || entry.file_name().to_str() != Some(m.id.as_str())
                 || db.has_dataset(&m.id)?
             {
@@ -1014,11 +1103,13 @@ async fn main() -> anyhow::Result<()> {
     let listen = std::env::var("PORT")
         .map(|p| format!("0.0.0.0:{p}"))
         .unwrap_or_else(|_| config.listen.clone());
+    let parallel = config.max_parallel_jobs.max(1);
     let app = App {
         config: Arc::new(config),
         db,
         persistence_failures: Arc::new(Mutex::new(HashSet::new())),
-        busy: Arc::new(AtomicBool::new(false)),
+        workers: Arc::new(tokio::sync::Semaphore::new(parallel)),
+        leases: Arc::new(Mutex::new(HashSet::new())),
         datasets: Arc::new(datasets),
         token: Arc::new(
             std::env::var("MERIDIAN_ADMIN_TOKEN_FILE")
@@ -1124,7 +1215,7 @@ async fn main() -> anyhow::Result<()> {
             shutdown_app.stopping.store(true, Ordering::SeqCst);
             // Let the bounded capture/processing finish. After a forced stop the durable job is recovered as interrupted.
             for _ in 0..180 {
-                if !shutdown_app.busy.load(Ordering::SeqCst) {
+                if !busy(&shutdown_app) {
                     break;
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;

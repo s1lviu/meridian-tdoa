@@ -65,7 +65,21 @@ impl Db {
                 monitor_target TEXT,
                 body TEXT NOT NULL);
              CREATE INDEX IF NOT EXISTS jobs_started ON jobs(started_ms);
-             CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+             CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS receiver_health (
+                id TEXT PRIMARY KEY,
+                ok INTEGER NOT NULL DEFAULT 0,
+                failed INTEGER NOT NULL DEFAULT 0,
+                fails_in_row INTEGER NOT NULL DEFAULT 0,
+                last_ok_ms INTEGER,
+                last_fail_ms INTEGER,
+                last_reason TEXT,
+                blocked_until_ms INTEGER NOT NULL DEFAULT 0);
+             CREATE TABLE IF NOT EXISTS receiver_usage (
+                id TEXT NOT NULL,
+                start_ms INTEGER NOT NULL,
+                seconds REAL NOT NULL);
+             CREATE INDEX IF NOT EXISTS receiver_usage_id ON receiver_usage(id, start_ms);",
         )?;
         Ok(Db(Mutex::new(conn)))
     }
@@ -182,6 +196,103 @@ impl Db {
         )?)
     }
 
+    /// Record one receiver's capture outcome. Failures back off exponentially from 10 min
+    /// (capped at 24 h); an explicit refusal can impose a longer block (e.g. a per-IP time limit).
+    pub fn record_receiver(&self, o: &crate::capture::ReceiverOutcome, now_ms: i64) -> Result<()> {
+        let conn = self.0.lock().unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO receiver_health (id) VALUES (?1)",
+            [&o.id],
+        )?;
+        if o.ok {
+            conn.execute(
+                "UPDATE receiver_health SET ok=ok+1, fails_in_row=0, last_ok_ms=?2 WHERE id=?1",
+                params![o.id, now_ms],
+            )?;
+        } else {
+            let n: i64 = conn.query_row(
+                "SELECT fails_in_row FROM receiver_health WHERE id=?1",
+                [&o.id],
+                |r| r.get(0),
+            )?;
+            let backoff_ms = (600_000i64 << n.min(8)).min(86_400_000);
+            let block = backoff_ms.max((o.block_s * 1000.) as i64);
+            conn.execute(
+                "UPDATE receiver_health SET failed=failed+1, fails_in_row=fails_in_row+1, last_fail_ms=?2,
+                 last_reason=?3, blocked_until_ms=MAX(blocked_until_ms, ?4) WHERE id=?1",
+                params![o.id, now_ms, o.reason, now_ms + block],
+            )?;
+        }
+        if o.connected_s > 0. {
+            conn.execute(
+                "INSERT INTO receiver_usage (id,start_ms,seconds) VALUES (?1,?2,?3)",
+                params![o.id, now_ms, o.connected_s],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Receivers that must not be contacted now: blocked, within the minimum gap since their
+    /// last connection, or out of their daily connection-time budget for `planned_s` more.
+    pub fn unusable_receivers(
+        &self,
+        now_ms: i64,
+        policy: &crate::model::ReceiverPolicy,
+        planned_s: f64,
+    ) -> Result<std::collections::HashSet<String>> {
+        let conn = self.0.lock().unwrap();
+        let mut out = std::collections::HashSet::new();
+        let mut stmt = conn.prepare("SELECT id FROM receiver_health WHERE blocked_until_ms>?1")?;
+        for id in stmt.query_map([now_ms], |r| r.get::<_, String>(0))? {
+            out.insert(id?);
+        }
+        let mut stmt = conn.prepare(
+            "SELECT id, SUM(seconds), MAX(start_ms) FROM receiver_usage WHERE start_ms>?1 GROUP BY id",
+        )?;
+        let rows = stmt.query_map([now_ms - 86_400_000], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, f64>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (id, used, last) = row?;
+            if used + planned_s > policy.daily_minutes * 60.
+                || now_ms - last < policy.min_gap_s as i64 * 1000
+            {
+                out.insert(id);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Record every receiver contacted by the capture in `dir` (fair-use accounting).
+    pub fn account(&self, dir: &Path, duration_s: u64) {
+        let now = chrono::Utc::now().timestamp_millis();
+        for o in crate::capture::outcomes(dir, duration_s) {
+            if let Err(e) = self.record_receiver(&o, now) {
+                eprintln!("Receiver accounting failed for {}: {e}", o.id);
+            }
+        }
+    }
+
+    pub fn receiver_health(&self) -> Result<Vec<Value>> {
+        let conn = self.0.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT h.id, h.ok, h.failed, h.fails_in_row, h.last_ok_ms, h.last_fail_ms, h.last_reason, h.blocked_until_ms,
+                    (SELECT COALESCE(SUM(seconds),0) FROM receiver_usage u WHERE u.id=h.id AND u.start_ms>?1)
+             FROM receiver_health h ORDER BY h.id",
+        )?;
+        let since = chrono::Utc::now().timestamp_millis() - 86_400_000;
+        let rows = stmt.query_map([since], |r| {
+            Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"ok":r.get::<_,i64>(1)?,"failed":r.get::<_,i64>(2)?,
+                "fails_in_row":r.get::<_,i64>(3)?,"last_ok_ms":r.get::<_,Option<i64>>(4)?,"last_fail_ms":r.get::<_,Option<i64>>(5)?,
+                "last_reason":r.get::<_,Option<String>>(6)?,"blocked_until_ms":r.get::<_,i64>(7)?,"seconds_24h":r.get::<_,f64>(8)?}))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     pub fn put_job(&self, id: &str, job: &Value) -> Result<()> {
         let conn = self.0.lock().unwrap();
         conn.execute(
@@ -276,6 +387,10 @@ impl Db {
                 [now_ms - (policy.negative_result_days * day) as i64],
             )?;
         }
+        conn.execute(
+            "DELETE FROM receiver_usage WHERE start_ms<?1",
+            [now_ms - 2 * 86_400_000],
+        )?;
         let jobs = if policy.job_days > 0. {
             conn.execute(
                 "DELETE FROM jobs WHERE status!='running' AND COALESCE(updated_ms, started_ms, 0)<?1",

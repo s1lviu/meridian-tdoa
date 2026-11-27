@@ -48,6 +48,9 @@ pub(super) fn configured_targets(config: &Config) -> Result<Option<(MonitorConfi
                 t.kind == "public_time_reference" && t.frequency_hz == 77500.
             }
             Some(ibp::PROFILE) => t.kind == "public_beacon" && ibp::band(t.frequency_hz).is_some(),
+            Some(meridian_tdoa::ft8_tdoa::PROFILE) => {
+                t.kind == "amateur_digital" && meridian_tdoa::bands::name(t.frequency_hz).is_some()
+            }
             _ => false,
         };
         ensure!(valid, "No automatic RF verifier for monitor target {id}");
@@ -84,8 +87,13 @@ fn plan_bands(
     bands: &[usize],
     rounds: &mut [usize],
     limit: usize,
+    excluded: &HashSet<String>,
 ) -> Vec<Result<(Config, Target)>> {
-    let dynamic = |t: &Target| limit > 0 && t.verification.as_deref() == Some(ibp::PROFILE);
+    let dynamic = |t: &Target| {
+        limit > 0
+            && [Some(ibp::PROFILE), Some(meridian_tdoa::ft8_tdoa::PROFILE)]
+                .contains(&t.verification.as_deref())
+    };
     // Fixed receivers (e.g. LF) get their frequency before the worldwide pool is allocated.
     let mut reserved: HashSet<_> = bands
         .iter()
@@ -99,18 +107,21 @@ fn plan_bands(
                 .map(|s| s.independent_device.clone())
         })
         .collect();
+    reserved.extend(excluded.iter().cloned());
     let mut assigned = HashSet::new();
     bands
         .iter()
         .map(|&i| {
             let mut t = targets[i].clone();
             let mut cfg = config.clone();
+            // Fixed receivers that are blocked or out of budget are skipped for this window.
+            t.source_ids.retain(|id| !excluded.contains(id));
             if dynamic(&t) {
                 let round = rounds[i];
                 rounds[i] += 1;
                 cfg.sources = directory
                     .ok_or_else(|| anyhow::anyhow!("Receiver directory unavailable"))?
-                    .network_excluding(t.frequency_hz - 700., round, limit, &reserved)?;
+                    .network_excluding(capture::iq_center(&t), round, limit, &reserved)?;
                 t.source_ids = cfg.sources.iter().map(|s| s.id.clone()).collect();
             }
             let sources = capture::authorize(&cfg, &t)?;
@@ -129,12 +140,13 @@ fn plan_bands(
         .collect()
 }
 
-fn next_slot(
-    earliest: DateTime<Utc>,
-    last_attempt: Option<DateTime<Utc>>,
-    interval: TimeDelta,
-) -> DateTime<Utc> {
-    last_attempt.map_or(earliest, |at| earliest.max(at + interval))
+/// FT8 transmissions start 0.5 s after each 15 s UTC boundary. Start the connections
+/// `LEAD` seconds before a boundary so connection set-up and the 1 s settling end before it.
+const FT8_LEAD_MS: i64 = 4000;
+fn ft8_aligned(t: DateTime<Utc>) -> DateTime<Utc> {
+    let s = t.timestamp_millis() + FT8_LEAD_MS;
+    let boundary = (s + 14_999).div_euclid(15_000) * 15_000;
+    DateTime::from_timestamp_millis(boundary - FT8_LEAD_MS).unwrap()
 }
 
 fn failed(app: &App, id: &str, reason: &str) {
@@ -147,7 +159,6 @@ fn failed(app: &App, id: &str, reason: &str) {
 
 pub(super) async fn run(app: App, settings: MonitorConfig, targets: Vec<Target>) {
     let interval = TimeDelta::seconds(settings.interval_s as i64);
-    let mut earliest = Utc::now();
     let (mut index, last_id, mut rounds) = {
         let (latest, counts) = app.db.monitor_history().unwrap_or_default();
         let rounds: Vec<_> = targets
@@ -179,16 +190,18 @@ pub(super) async fn run(app: App, settings: MonitorConfig, targets: Vec<Target>)
             .map(|&i| targets[i].id.clone())
             .collect::<Vec<String>>()
     };
+    let mut due = Utc::now();
     let paused = loop {
         if app.stopping.load(Ordering::SeqCst) {
             return;
         }
-        let last = match capture::last_attempt(Path::new("data/captures")) {
-            Ok(last) => last,
-            Err(err) => break format!("Capture history unavailable: {err}"),
-        };
-        let due = next_slot(earliest, last, interval);
         let bands = band_indices(index);
+        if bands
+            .iter()
+            .any(|&i| targets[i].verification.as_deref() == Some(meridian_tdoa::ft8_tdoa::PROFILE))
+        {
+            due = ft8_aligned(due);
+        }
         {
             let mut status = app.monitor.write().unwrap();
             status.next_at = Some(due);
@@ -196,24 +209,34 @@ pub(super) async fn run(app: App, settings: MonitorConfig, targets: Vec<Target>)
         }
         if let Ok(wait) = (due - Utc::now()).to_std() {
             tokio::time::sleep(wait).await;
-            continue;
         }
-        earliest = Utc::now() + interval;
+        due = Utc::now() + interval; // the next window never replays missed slots
         if let Err(err) = capture::validate_clock(
             &app.config,
             bands.iter().map(|&i| targets[i].duration_s).max().unwrap(),
         ) {
             break err.to_string();
         }
-        let _guard = match reserve_worker(&app) {
+        let guard = match reserve_worker(&app) {
             Ok(guard) => guard,
             Err(err) if err.0 == StatusCode::CONFLICT => {
                 app.monitor.write().unwrap().notice =
-                    Some("Window skipped while the receiver network was busy".into());
+                    Some("Window skipped: every worker is busy with earlier windows".into());
                 continue;
             }
             Err(err) => break err.1,
         };
+        // Receivers already in flight, blocked, inside their gap or out of daily budget.
+        let planned = bands.iter().map(|&i| targets[i].duration_s).max().unwrap() as f64;
+        let mut excluded = app
+            .db
+            .unusable_receivers(
+                Utc::now().timestamp_millis(),
+                &app.config.receivers,
+                planned,
+            )
+            .unwrap_or_default();
+        excluded.extend(app.leases.lock().unwrap().iter().cloned());
         let mut ids = Vec::new();
         let mut problem = None;
         for &i in &bands {
@@ -234,7 +257,7 @@ pub(super) async fn run(app: App, settings: MonitorConfig, targets: Vec<Target>)
         index = (index + bands.len()) % targets.len();
         *app.monitor.write().unwrap() = Status {
             next_targets: target_names(&band_indices(index)),
-            next_at: Some(earliest),
+            next_at: Some(due),
             last_jobs: ids.clone(),
             notice: None,
         };
@@ -245,6 +268,7 @@ pub(super) async fn run(app: App, settings: MonitorConfig, targets: Vec<Target>)
             &bands,
             &mut rounds,
             settings.directory_receivers,
+            &excluded,
         );
         let mut ready = Vec::new();
         let mut work_ids = Vec::new();
@@ -257,47 +281,63 @@ pub(super) async fn run(app: App, settings: MonitorConfig, targets: Vec<Target>)
                 Err(err) => failed(&app, id, &err.to_string()),
             }
         }
-        if !ready.is_empty() {
-            match capture::reserve_window(ready, Path::new("data/captures")) {
-                Ok(captures) => {
-                    let mut tasks = tokio::task::JoinSet::new();
-                    for (id, capture) in work_ids.iter().cloned().zip(captures) {
-                        let app = app.clone();
-                        tasks.spawn(async move {
-                            finish(app, id, capture::record(capture).await, None).await;
-                        });
-                    }
-                    while let Some(result) = tasks.join_next().await {
-                        if let Err(err) = result {
-                            eprintln!("Band worker failed: {err}");
-                        }
-                    }
-                    for id in &work_ids {
-                        if app
-                            .db
-                            .job(id)
-                            .ok()
-                            .flatten()
-                            .is_some_and(|j| j["status"] == "running")
-                        {
-                            failed(&app, id, "Band worker interrupted");
-                        }
-                    }
+        if ready.is_empty() {
+            continue;
+        }
+        let captures = match capture::reserve_window(ready, Path::new("data/captures")) {
+            Ok(c) => c,
+            Err(err) => {
+                for id in &work_ids {
+                    failed(&app, id, &err.to_string());
                 }
-                Err(err) => {
-                    for id in &work_ids {
-                        failed(&app, id, &err.to_string());
+                if err
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|e| e.kind() == std::io::ErrorKind::StorageFull)
+                {
+                    break "IQ archive is full. Archive data before restarting the monitor.".into();
+                }
+                continue;
+            }
+        };
+        let leased: Vec<String> = captures.iter().flat_map(|c| c.receiver_ids()).collect();
+        app.leases.lock().unwrap().extend(leased.iter().cloned());
+        // The window runs in the background; the loop schedules the next one on time.
+        let window_app = app.clone();
+        tokio::spawn(async move {
+            let _guard = guard;
+            let mut tasks = tokio::task::JoinSet::new();
+            for (id, capture) in work_ids.iter().cloned().zip(captures) {
+                let app = window_app.clone();
+                tasks.spawn(async move {
+                    let duration = capture.target().duration_s;
+                    let result = capture::record(capture).await;
+                    if let Ok(manifest) = &result {
+                        account(&app, manifest.parent().unwrap_or(Path::new(".")), duration);
                     }
-                    if err
-                        .downcast_ref::<std::io::Error>()
-                        .is_some_and(|e| e.kind() == std::io::ErrorKind::StorageFull)
-                    {
-                        break "IQ archive is full. Archive data before restarting the monitor."
-                            .into();
-                    }
+                    finish(app, id, result, None).await;
+                });
+            }
+            while let Some(result) = tasks.join_next().await {
+                if let Err(err) = result {
+                    eprintln!("Band worker failed: {err}");
                 }
             }
-        }
+            for id in &work_ids {
+                if window_app
+                    .db
+                    .job(id)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|j| j["status"] == "running")
+                {
+                    failed(&window_app, id, "Band worker interrupted");
+                }
+            }
+            let mut leases = window_app.leases.lock().unwrap();
+            for id in &leased {
+                leases.remove(id);
+            }
+        });
         if ids
             .iter()
             .any(|id| app.persistence_failures.lock().unwrap().contains(id))
@@ -305,32 +345,33 @@ pub(super) async fn run(app: App, settings: MonitorConfig, targets: Vec<Target>)
             break "Could not save the capture job. Check storage before restarting the monitor."
                 .into();
         }
-        if earliest <= Utc::now() {
-            earliest = Utc::now() + interval;
-        } // Never replay missed slots.
     };
     let mut status = app.monitor.write().unwrap();
     status.next_at = None;
     status.notice = Some(paused);
 }
 
+/// Fair-use accounting for every receiver contacted by a capture.
+pub(super) fn account(app: &App, capture_dir: &Path, duration_s: u64) {
+    app.db.account(capture_dir, duration_s);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn restart_and_manual_capture_observe_the_same_slot() {
-        let now = Utc::now();
-        let interval = TimeDelta::minutes(5);
-        assert_eq!(next_slot(now, None, interval), now);
-        assert_eq!(next_slot(now, Some(now - interval * 2), interval), now);
-        assert_eq!(
-            next_slot(now, Some(now - TimeDelta::seconds(10)), interval),
-            now + interval - TimeDelta::seconds(10)
-        );
+    fn ft8_windows_start_before_a_slot_boundary_and_never_in_the_past() {
+        for ms in [0i64, 1, 10_999, 11_000, 11_001, 14_999, 29_000] {
+            let t = DateTime::from_timestamp_millis(1_800_000_000_000 + ms).unwrap();
+            let a = ft8_aligned(t);
+            assert!(a >= t);
+            assert_eq!((a.timestamp_millis() + FT8_LEAD_MS) % 15_000, 0);
+            assert!(a - t < TimeDelta::seconds(15));
+        }
     }
 
     #[test]
-    fn simultaneous_beacon_bands_reserve_disjoint_devices_and_one_archive_window() {
+    fn simultaneous_bands_use_disjoint_receivers_and_skip_excluded_ones() {
         let mut cfg: Config =
             serde_json::from_str(include_str!("../config/production.json")).unwrap();
         cfg.gps_offset_valid_until_utc = Some((Utc::now() + TimeDelta::days(1)).to_rfc3339());
@@ -338,6 +379,7 @@ mod tests {
         let directory =
             meridian_tdoa::directory::load(Path::new("evidence/live/directory.json")).unwrap();
         let mut rounds = vec![0; targets.len()];
+        let none = HashSet::new();
         let plans = plan_bands(
             &cfg,
             Some(&directory),
@@ -345,33 +387,49 @@ mod tests {
             &[1, 2],
             &mut rounds,
             settings.directory_receivers,
+            &none,
         )
         .into_iter()
         .collect::<Result<Vec<_>>>()
         .unwrap();
-        let ids: HashSet<_> = plans.iter().flat_map(|(_, t)| &t.source_ids).collect();
-        assert_eq!(ids.len(), 16);
+        let ids: HashSet<_> = plans
+            .iter()
+            .flat_map(|(_, t)| t.source_ids.clone())
+            .collect();
+        assert_eq!(
+            ids.len(),
+            16,
+            "two bands, eight receivers each, no receiver twice"
+        );
         let tmp = tempfile::tempdir().unwrap();
         assert!(
             capture::reserve_window(vec![plans[0].clone(), plans[0].clone()], tmp.path()).is_err()
         );
-        assert!(capture::last_attempt(tmp.path()).unwrap().is_none());
-        let window = capture::reserve_window(plans.clone(), tmp.path()).unwrap();
-        assert_eq!(window.len(), 2);
+        // Windows on disjoint receivers may overlap in time: no global cooldown or archive lock.
+        let first = capture::reserve_window(vec![plans[0].clone()], tmp.path()).unwrap();
+        let second = capture::reserve_window(vec![plans[1].clone()], tmp.path()).unwrap();
+        assert_eq!(first.len() + second.len(), 2);
+        // Excluded receivers (blocked, out of budget or leased) are never selected.
+        let mut rounds = vec![0; targets.len()];
+        let excluded: HashSet<String> = plans[0].1.source_ids.iter().cloned().collect();
+        let again = plan_bands(
+            &cfg,
+            Some(&directory),
+            &targets,
+            &[1],
+            &mut rounds,
+            settings.directory_receivers,
+            &excluded,
+        )
+        .into_iter()
+        .collect::<Result<Vec<_>>>()
+        .unwrap();
         assert!(
-            capture::reserve_window(plans.clone(), tmp.path())
-                .err()
-                .unwrap()
-                .to_string()
-                .contains("reserve the IQ archive")
-        );
-        drop(window);
-        assert!(
-            capture::reserve_window(plans, tmp.path())
-                .err()
-                .unwrap()
-                .to_string()
-                .contains("60 s")
+            again[0]
+                .1
+                .source_ids
+                .iter()
+                .all(|id| !excluded.contains(id))
         );
         let fixed = plan_bands(
             &cfg,
@@ -380,6 +438,7 @@ mod tests {
             &[1, 0],
             &mut rounds,
             settings.directory_receivers,
+            &none,
         )
         .into_iter()
         .collect::<Result<Vec<_>>>()

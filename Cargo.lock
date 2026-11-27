@@ -738,8 +738,10 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum",
+ "cc",
  "chrono",
  "geographiclib-rs",
+ "libm",
  "reqwest",
  "rusqlite",
  "rustfft",

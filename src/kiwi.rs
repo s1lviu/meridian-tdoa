@@ -152,7 +152,21 @@ impl Track {
     pub fn end(&self) -> f64 {
         self.blocks.last().unwrap().t
     }
+    /// Samples at `start + i/fs` (GNSS seconds of week) by Kaiser-windowed sinc interpolation
+    /// (16 taps per side, β = 7.86 ≈ 80 dB; passband ±5 kHz at 12 kHz). Time between block
+    /// timestamps is linear, as recorded by the receiver.
     pub fn resample(&self, start: f64, fs: f64, n: usize) -> Vec<Complex<f64>> {
+        let flat: Vec<Complex<f64>> = self
+            .blocks
+            .iter()
+            .flat_map(|b| b.iq.iter().copied())
+            .collect();
+        let mut offsets = Vec::with_capacity(self.blocks.len());
+        let mut acc = 0usize;
+        for b in &self.blocks {
+            offsets.push(acc);
+            acc += b.iq.len();
+        }
         let mut k = 0;
         (0..n)
             .map(|i| {
@@ -160,18 +174,11 @@ impl Track {
                 while k + 1 < self.blocks.len() - 1 && self.blocks[k + 1].t <= t {
                     k += 1;
                 }
-                let b = &self.blocks[k];
-                let next = &self.blocks[k + 1];
-                let x = ((t - b.t) / (next.t - b.t) * b.iq.len() as f64)
-                    .clamp(0., b.iq.len() as f64 - 1e-8);
-                let j = x.floor() as usize;
-                let f = x - j as f64;
-                let right = if j + 1 < b.iq.len() {
-                    b.iq[j + 1]
-                } else {
-                    next.iq[0]
-                };
-                b.iq[j] * (1. - f) + right * f
+                let (b, next) = (&self.blocks[k], &self.blocks[k + 1]);
+                let x = offsets[k] as f64
+                    + ((t - b.t) / (next.t - b.t) * b.iq.len() as f64)
+                        .clamp(0., (offsets[k + 1] - offsets[k]) as f64);
+                crate::dsp::sinc_at(&flat, x)
             })
             .collect()
     }
