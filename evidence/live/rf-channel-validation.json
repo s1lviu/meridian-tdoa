@@ -1,0 +1,701 @@
+{
+  "date_utc": "2026-11-27",
+  "origin": "KiwiSDR IQ captured over the air. Anonymous channel windows have no independently established transmitter identity. Regions are model uncertainty.",
+  "dcf77_reference_windows": {
+    "archived_windows": 41,
+    "unique": 32,
+    "reference": "PTB transmitter, post-hoc only",
+    "all_pairs": {
+      "contour_coverage": 1.0,
+      "covariance_coverage": 1.0,
+      "max_error_km": 14.398650935469448,
+      "median_error_km": 10.532485252811124,
+      "median_radius_km": 50.221920230400016,
+      "observations": 32,
+      "p90_error_km": 13.66447549550976,
+      "unique": 32
+    },
+    "independent_receiver_pairs_used": 192,
+    "ellipse_68_evaluated": 32,
+    "ellipse_68_coverage": 1.0
+  },
+  "ft8_40m": {
+    "datasets": 16,
+    "payload_slot_observations": 595,
+    "distinct_decoded_transmitters": 301,
+    "timed_by_two_plus": 467,
+    "four_plus_with_transmitted_grid": 78,
+    "unique": 2,
+    "uncapped_bounded": 20,
+    "uncapped_contains_grid_centre": 18,
+    "fixes": [
+      {
+        "id": "live-b2071879-4485-40dd-b0ab-74208de04a02-1795806255-00000024af806f085a08",
+        "start_utc": "2026-11-27T19:04:15.000Z",
+        "callsign": "KA9SOG",
+        "transmitted_grid": "EN52",
+        "distance_to_grid_centre_km": 193.694,
+        "radius_95_km": 853.809,
+        "used_receivers": 4
+      },
+      {
+        "id": "live-e9eac206-5fd1-4b15-b8e5-203b84b02db6-1795805970-0c28147558488a8a1408",
+        "start_utc": "2026-11-27T18:59:30.000Z",
+        "callsign": "NF3R",
+        "transmitted_grid": "FN20",
+        "distance_to_grid_centre_km": 273.72,
+        "radius_95_km": 1542.996,
+        "used_receivers": 5
+      }
+    ]
+  },
+  "correlated_channel_windows": [
+    {
+      "capture_id": "live-8f69a3f5-7d5a-4b9e-a267-60b0cc30412a",
+      "capture_utc": "2026-11-27T19:40:58.568727+00:00",
+      "center_hz": 77500.0,
+      "transport": "kiwiclient",
+      "iq_receivers": [
+        {
+          "receiver_id": "1442fc0f6d4a",
+          "sha256": "8f3a257751ed7d1f58310de2f80698841dfd400028654e30cd3ce752dedf5629",
+          "rx_position": {
+            "lat": 51.89,
+            "lon": 12.76
+          },
+          "rx_position_uncertainty_m": 1000.0
+        },
+        {
+          "receiver_id": "40bd32c8dbd9",
+          "sha256": "bb41f6819c6b475381a989e517c82a4d19b7110dedf6b66893a115f29a447849",
+          "rx_position": {
+            "lat": 49.57318,
+            "lon": 8.622059
+          },
+          "rx_position_uncertainty_m": 1000.0
+        },
+        {
+          "receiver_id": "b8804f25a14d",
+          "sha256": "b65b11f4f7250bc3f203c41760651afc223585870afd7897f9613483171f23ae",
+          "rx_position": {
+            "lat": 49.244742,
+            "lon": 11.075949
+          },
+          "rx_position_uncertainty_m": 1000.0
+        }
+      ],
+      "cfar_subbands": 27,
+      "correlated_subbands": 3,
+      "unique": 0,
+      "fixes": []
+    },
+    {
+      "capture_id": "live-9e5f180e-c490-4b2b-a68a-c39d64956b24",
+      "capture_utc": "2026-11-27T19:42:35.616968+00:00",
+      "center_hz": 77500.0,
+      "transport": "kiwiclient",
+      "iq_receivers": [
+        {
+          "receiver_id": "38d2697ce5e5",
+          "sha256": "f60240535309bf985016a3fcb40ad473241b81e21ab64b76c1aa329bd3377e42",
+          "rx_position": {
+            "lat": 47.25,
+            "lon": 6.04
+          },
+          "rx_position_uncertainty_m": 1000.0
+        },
+        {
+          "receiver_id": "40bd32c8dbd9",
+          "sha256": "0e2fe92c6e9d57666b15e2f7c082f46b3d38a51a3c244b3d6d00648379d6d2b2",
+          "rx_position": {
+            "lat": 49.57318,
+            "lon": 8.622059
+          },
+          "rx_position_uncertainty_m": 1000.0
+        },
+        {
+          "receiver_id": "b0d5ccfc7404",
+          "sha256": "2d6cc72c2829725a6e54b4140b6f34ce4b6eef1717150d69df349952d04cefc7",
+          "rx_position": {
+            "lat": 50.93,
+            "lon": 11.57
+          },
+          "rx_position_uncertainty_m": 1000.0
+        },
+        {
+          "receiver_id": "b8804f25a14d",
+          "sha256": "873b463c05be43408a7898661f7a89e403f041432de7b39e180658047b0e28e4",
+          "rx_position": {
+            "lat": 49.244742,
+            "lon": 11.075949
+          },
+          "rx_position_uncertainty_m": 1000.0
+        },
+        {
+          "receiver_id": "f82e0c0ea3e1",
+          "sha256": "cd955bdceb77f019e9619e422109feecbfdd6e856678addfd3cab29ee9da43d2",
+          "rx_position": {
+            "lat": 50.80546,
+            "lon": 6.26035
+          },
+          "rx_position_uncertainty_m": 1000.0
+        }
+      ],
+      "cfar_subbands": 7,
+      "correlated_subbands": 3,
+      "unique": 0,
+      "fixes": []
+    },
+    {
+      "capture_id": "live-b57a8b5f-542e-4443-9c6d-087460c8caaa",
+      "capture_utc": "2026-11-27T19:44:14.804492+00:00",
+      "center_hz": 60000.0,
+      "transport": "kiwiclient",
+      "iq_receivers": [
+        {
+          "receiver_id": "985dad7f0dd5",
+          "sha256": "1e983f22aadea1a007192dd1dd7a808725614c1e8edefe0c794b72dcc0eb4fdf",
+          "rx_position": {
+            "lat": 52.86717,
+            "lon": -6.858804
+          },
+          "rx_position_uncertainty_m": 1000.0
+        },
+        {
+          "receiver_id": "b8804f25c910",
+          "sha256": "47625ef39818ac88c018ec2746568c876f5c83f97caabf64bcd967cfce118ffd",
+          "rx_position": {
+            "lat": 49.51,
+            "lon": 0.16
+          },
+          "rx_position_uncertainty_m": 1000.0
+        },
+        {
+          "receiver_id": "c4f312a0873f",
+          "sha256": "d9a91d6c65bd59118fd1c3673969cf2f925bcaed3accc7279e61d86c9f7ecca6",
+          "rx_position": {
+            "lat": 54.51,
+            "lon": -1.33
+          },
+          "rx_position_uncertainty_m": 1000.0
+        },
+        {
+          "receiver_id": "e415f6fd892d",
+          "sha256": "8b08e47bd58afe7f00c7f4d0954860101bf57c0f90c1b728106c32e9bdd3af6a",
+          "rx_position": {
+            "lat": 51.74,
+            "lon": -3.4
+          },
+          "rx_position_uncertainty_m": 1000.0
+        }
+      ],
+      "cfar_subbands": 6,
+      "correlated_subbands": 1,
+      "unique": 0,
+      "fixes": []
+    },
+    {
+      "capture_id": "live-9d1875b9-44e1-4e3f-98dd-a5a4483fa13c",
+      "capture_utc": "2026-11-27T19:45:53.216058+00:00",
+      "center_hz": 60000.0,
+      "transport": "kiwiclient",
+      "iq_receivers": [
+        {
+          "receiver_id": "985dad7f0dd5",
+          "sha256": "d89c9fcbe1e8a044480f1f8f84aaf7352538da1a6da813be9f0793eb56dbf987",
+          "rx_position": {
+            "lat": 52.86717,
+            "lon": -6.858804
+          },
+          "rx_position_uncertainty_m": 1000.0
+        },
+        {
+          "receiver_id": "c4f312a0873f",
+          "sha256": "a4f5c9d54212a438edb23f60527216e8a53d0d37bfd8f2d9deb448ad7b33a9b5",
+          "rx_position": {
+            "lat": 54.51,
+            "lon": -1.33
+          },
+          "rx_position_uncertainty_m": 1000.0
+        },
+        {
+          "receiver_id": "c4f312b9ff12",
+          "sha256": "ec73563278f237e246de621b25589d55563e34d7fd6a4e493c3fbd55205a40e1",
+          "rx_position": {
+            "lat": 55.91,
+            "lon": -5.24
+          },
+          "rx_position_uncertainty_m": 1000.0
+        }
+      ],
+      "cfar_subbands": 10,
+      "correlated_subbands": 0,
+      "unique": 0,
+      "fixes": []
+    },
+    {
+      "capture_id": "live-3ad2757d-4a63-4797-a7f7-f8e8241e38f0",
+      "capture_utc": "2026-11-27T19:47:31.613843+00:00",
+      "center_hz": 60000.0,
+      "transport": "kiwiclient",
+      "iq_receivers": [
+        {
+          "receiver_id": "0804b482d171",
+          "sha256": "5b6b4ce9d77018d629796303fc89e49ed58cae23f4c8e4c7a3ff36ef12560627",
+          "rx_position": {
+            "lat": 52.5021,
+            "lon": 4.98509
+          },
+          "rx_position_uncertainty_m": 1000.0
+        },
+        {
+          "receiver_id": "0804b4a0038d",
+          "sha256": "f21ed291f647b4ed63eb9f0c99087ff696f02ef78bfcd850bdfc2fdc431b4f7f",
+          "rx_position": {
+            "lat": 53.58,
+            "lon": -7.35
+          },
+          "rx_position_uncertainty_m": 1000.0
+        },
+        {
+          "receiver_id": "c4f312b9ff12",
+          "sha256": "f2b68a7dc06f27822230e615371d18725ad56ca8ff723616db28791d4306c87f",
+          "rx_position": {
+            "lat": 55.91,
+            "lon": -5.24
+          },
+          "rx_position_uncertainty_m": 1000.0
+        }
+      ],
+      "cfar_subbands": 27,
+      "correlated_subbands": 0,
+      "unique": 0,
+      "fixes": []
+    },
+    {
+      "capture_id": "live-900194e6-b785-4387-b76e-d59d64dc2a4e",
+      "capture_utc": "2026-11-27T19:53:01.711083+00:00",
+      "center_hz": 648000.0,
+      "transport": "kiwiclient",
+      "iq_receivers": [
+        {
+          "receiver_id": "6ceceb67bea2",
+          "sha256": "451ffe29a7e277aec54eebbe5806a3b4d8f5d05d329c4fc8cf8bad7ff948ef0e",
+          "rx_position": {
+            "lat": 53.168558,
+            "lon": 6.598145
+          },
+          "rx_position_uncertainty_m": 1000.0
+        },
+        {
+          "receiver_id": "780473834f1d",
+          "sha256": "faebbd3d5d9bc344f4318b40a489ce32972f6ac70efc2ed3484b9725d6ac172d",
+          "rx_position": {
+            "lat": 47.160165,
+            "lon": 7.580429
+          },
+          "rx_position_uncertainty_m": 1000.0
+        },
+        {
+          "receiver_id": "883f4aa8e0aa",
+          "sha256": "a0b84d6af2124ba757f813028d03184f7937ecab6630a94770f02eef5c90c578",
+          "rx_position": {
+            "lat": 52.39,
+            "lon": 13.29
+          },
+          "rx_position_uncertainty_m": 1000.0
+        },
+        {
+          "receiver_id": "b0d5ccfc7404",
+          "sha256": "3c7ca12cd0c6b09030721a8f8e8b27ad68ba962421ad526ac9596be63898a44e",
+          "rx_position": {
+            "lat": 50.93,
+            "lon": 11.57
+          },
+          "rx_position_uncertainty_m": 1000.0
+        },
+        {
+          "receiver_id": "b8804f25a14d",
+          "sha256": "af4f6c47828185b90ccb18818f7d7f50d7d9881a745cc34e97c640f4de9db940",
+          "rx_position": {
+            "lat": 49.244742,
+            "lon": 11.075949
+          },
+          "rx_position_uncertainty_m": 1000.0
+        }
+      ],
+      "cfar_subbands": 22,
+      "correlated_subbands": 5,
+      "unique": 1,
+      "fixes": [
+        {
+          "id": "live-900194e6-b785-4387-b76e-d59d64dc2a4e-+6",
+          "frequency_hz": 648005.859375,
+          "start_utc": "2026-11-27T19:53:03.604Z",
+          "center": {
+            "lat": 51.90032798655394,
+            "lon": 2.5504073772894458
+          },
+          "radius_95_km": 438.0305176951526,
+          "used_receivers": [
+            "6ceceb67bea2",
+            "780473834f1d",
+            "b0d5ccfc7404",
+            "b8804f25a14d"
+          ],
+          "delays": [
+            {
+              "a": "6ceceb67bea2",
+              "b": "780473834f1d",
+              "delay_us": 1096.7536674982437,
+              "sigma_us": 83.33333333333333
+            },
+            {
+              "a": "6ceceb67bea2",
+              "b": "b0d5ccfc7404",
+              "delay_us": 1146.0457101605282,
+              "sigma_us": 83.33333333333333
+            },
+            {
+              "a": "6ceceb67bea2",
+              "b": "b8804f25a14d",
+              "delay_us": 1195.3968406375334,
+              "sigma_us": 83.33333333333333
+            },
+            {
+              "a": "780473834f1d",
+              "b": "b0d5ccfc7404",
+              "delay_us": -13.96520981617802,
+              "sigma_us": 83.33333333333333
+            },
+            {
+              "a": "780473834f1d",
+              "b": "b8804f25a14d",
+              "delay_us": 57.13330885111183,
+              "sigma_us": 92.40018313337353
+            },
+            {
+              "a": "b0d5ccfc7404",
+              "b": "b8804f25a14d",
+              "delay_us": 30.151493586194,
+              "sigma_us": 83.33333333333333
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "capture_id": "live-4bb9a8de-b455-4068-845c-8516149bf1f1",
+      "capture_utc": "2026-11-27T19:53:43.155973+00:00",
+      "center_hz": 5000000.0,
+      "transport": "kiwiclient",
+      "iq_receivers": [
+        {
+          "receiver_id": "40bd322ecc6d",
+          "sha256": "a0fb3c956816914892ec9cb5bda65baaef66facb5c1d178a3886736db47a92af",
+          "rx_position": {
+            "lat": 52.35,
+            "lon": 20.6
+          },
+          "rx_position_uncertainty_m": 1000.0
+        },
+        {
+          "receiver_id": "40bd32c8dbd9",
+          "sha256": "b845389681a21e2aa406e0716293b0b7f59f558fe573ade2f55246a1998541cb",
+          "rx_position": {
+            "lat": 49.57318,
+            "lon": 8.622059
+          },
+          "rx_position_uncertainty_m": 1000.0
+        },
+        {
+          "receiver_id": "9006f25fdfe0",
+          "sha256": "c2ca13c3a832110c69345bf1943d321cc6c45682da7f3b583dd234cbab25e9c2",
+          "rx_position": {
+            "lat": 45.269722,
+            "lon": 2.924131
+          },
+          "rx_position_uncertainty_m": 1000.0
+        },
+        {
+          "receiver_id": "c4f312b9ff12",
+          "sha256": "86127ee2302b3161e8756203bb4fbf1651cdf1454ec70ba41e8061e7de007f9c",
+          "rx_position": {
+            "lat": 55.91,
+            "lon": -5.24
+          },
+          "rx_position_uncertainty_m": 1000.0
+        }
+      ],
+      "cfar_subbands": 9,
+      "correlated_subbands": 0,
+      "unique": 0,
+      "fixes": []
+    },
+    {
+      "capture_id": "live-9c212073-57fb-4823-9ac6-a7836db8069c",
+      "capture_utc": "2026-11-27T20:19:34.128946+00:00",
+      "center_hz": 648000.0,
+      "transport": "native",
+      "iq_receivers": [
+        {
+          "receiver_id": "6ceceb67bea2",
+          "sha256": "b38d810773ba303ed9d5fbd5860f810a0d2d2ee48b1084abfaa4fd97b0949ab7",
+          "rx_position": {
+            "lat": 53.168558,
+            "lon": 6.598145
+          },
+          "rx_position_uncertainty_m": 1000.0
+        },
+        {
+          "receiver_id": "780473834f1d",
+          "sha256": "f47d22a0bcc71aedcd1b9251442ad691e4ed5f82289e2b6e4b7c07b2469dec3a",
+          "rx_position": {
+            "lat": 47.160165,
+            "lon": 7.580429
+          },
+          "rx_position_uncertainty_m": 1000.0
+        },
+        {
+          "receiver_id": "b0d5ccfc7404",
+          "sha256": "eb0ed75a2125bfd3069fc5bcc6fa198d85f45d221b77b8e85bdfccdc9ae599d1",
+          "rx_position": {
+            "lat": 50.93,
+            "lon": 11.57
+          },
+          "rx_position_uncertainty_m": 1000.0
+        },
+        {
+          "receiver_id": "b8804f25a14d",
+          "sha256": "b78699bc244fb7420ed58f2ee333f8161a2fecca60c56171106fd6c76d4e93a8",
+          "rx_position": {
+            "lat": 49.244742,
+            "lon": 11.075949
+          },
+          "rx_position_uncertainty_m": 1000.0
+        }
+      ],
+      "cfar_subbands": 29,
+      "correlated_subbands": 5,
+      "unique": 1,
+      "fixes": [
+        {
+          "id": "live-9c212073-57fb-4823-9ac6-a7836db8069c--59",
+          "frequency_hz": 647941.40625,
+          "start_utc": "2026-11-27T20:19:35.685Z",
+          "center": {
+            "lat": 52.05886775833034,
+            "lon": 1.0844992967955704
+          },
+          "radius_95_km": 969.8828283776345,
+          "used_receivers": [
+            "6ceceb67bea2",
+            "780473834f1d",
+            "b0d5ccfc7404",
+            "b8804f25a14d"
+          ],
+          "delays": [
+            {
+              "a": "6ceceb67bea2",
+              "b": "780473834f1d",
+              "delay_us": 1069.8129402269237,
+              "sigma_us": 83.33333333333333
+            },
+            {
+              "a": "6ceceb67bea2",
+              "b": "b0d5ccfc7404",
+              "delay_us": 1123.5271996061922,
+              "sigma_us": 83.33333333333333
+            },
+            {
+              "a": "6ceceb67bea2",
+              "b": "b8804f25a14d",
+              "delay_us": 1285.6288362724056,
+              "sigma_us": 83.33333333333333
+            },
+            {
+              "a": "780473834f1d",
+              "b": "b0d5ccfc7404",
+              "delay_us": 36.42256230169416,
+              "sigma_us": 83.33333333333333
+            },
+            {
+              "a": "780473834f1d",
+              "b": "b8804f25a14d",
+              "delay_us": 211.55470418869228,
+              "sigma_us": 83.33333333333333
+            },
+            {
+              "a": "b0d5ccfc7404",
+              "b": "b8804f25a14d",
+              "delay_us": 147.40222886364583,
+              "sigma_us": 83.33333333333333
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "capture_id": "live-27551b99-4063-40e0-8c6d-db1f89992b68",
+      "capture_utc": "2026-11-27T20:24:27.725928+00:00",
+      "center_hz": 648000.0,
+      "transport": "native",
+      "iq_receivers": [
+        {
+          "receiver_id": "6ceceb67bea2",
+          "sha256": "9c8654ae582f62e3603aadb981f4bea47946ae9db5379b736ebee79f402afdb4",
+          "rx_position": {
+            "lat": 53.168558,
+            "lon": 6.598145
+          },
+          "rx_position_uncertainty_m": 1000.0
+        },
+        {
+          "receiver_id": "780473834f1d",
+          "sha256": "d5b2ced690e4202a132fc48365d5b8c1a44274bcd0c5160ff4e636c90e64d594",
+          "rx_position": {
+            "lat": 47.160165,
+            "lon": 7.580429
+          },
+          "rx_position_uncertainty_m": 1000.0
+        },
+        {
+          "receiver_id": "b0d5ccfc7404",
+          "sha256": "edbb0609d2215f223894975883a404165091d5e3a94f015b99a252098e29ee5c",
+          "rx_position": {
+            "lat": 50.93,
+            "lon": 11.57
+          },
+          "rx_position_uncertainty_m": 1000.0
+        },
+        {
+          "receiver_id": "b8804f25a14d",
+          "sha256": "0771d2c1d56f7f8d8d7342410f942ce87cef55b31685172c6f56427ee68711c8",
+          "rx_position": {
+            "lat": 49.244742,
+            "lon": 11.075949
+          },
+          "rx_position_uncertainty_m": 1000.0
+        }
+      ],
+      "cfar_subbands": 32,
+      "correlated_subbands": 4,
+      "unique": 0,
+      "fixes": []
+    }
+  ],
+  "evening_dcf77_trial": {
+    "dataset": "live-046faee6-ba3d-4580-a7c7-0524c4b17d94",
+    "capture_utc": "2026-11-27T20:28:56.512497+00:00",
+    "iq_delivered": 4,
+    "verified": false,
+    "phase_code_evidence": [
+      {
+        "accepted": false,
+        "accepted_windows": 0,
+        "correlations": [
+          0.04100621173045942,
+          0.035524356929142874,
+          0.042096222554090935,
+          0.03969801937262313,
+          0.03555888935114841,
+          0.04033552380040123,
+          0.04086170526135506,
+          0.034378427650441565,
+          0.03647077764703755,
+          0.035234235101997614,
+          0.03892308207321317,
+          0.040525437859403914,
+          0.0394266358060757,
+          0.03729704102367902
+        ],
+        "receiver_id": "38d2697ce5e5",
+        "sha256": "cc4e4c531c67dec1d5803bc07ead365bfdc9f18f5eff3e1bad477989f5dd0a8e",
+        "tested_windows": 14
+      },
+      {
+        "accepted": true,
+        "accepted_windows": 14,
+        "correlations": [
+          0.8342039483379109,
+          0.8298470130249513,
+          0.8339782941305481,
+          0.8321563635910468,
+          0.8329935631369526,
+          0.8356952405318108,
+          0.8255186369676878,
+          0.8339802768008627,
+          0.8352890076862467,
+          0.8282223614141526,
+          0.832790882650919,
+          0.8300266246009262,
+          0.8303105769588175,
+          0.828463636205836
+        ],
+        "receiver_id": "40bd32c8dbd9",
+        "sha256": "73085851a57c2ff950cc7838b3afe3baf9ce0214c5a0a04e4917cb8953192ca0",
+        "tested_windows": 14
+      },
+      {
+        "accepted": false,
+        "accepted_windows": 0,
+        "correlations": [
+          0.35324859913084455,
+          0.3549015677292327,
+          0.35107086877893545,
+          0.34923815002386,
+          0.3544209277213298,
+          0.3508547279761106,
+          0.3484245254656764,
+          0.3489819457454406,
+          0.35603000254768924,
+          0.3538447474134586,
+          0.3467018348355931,
+          0.33829575005424184,
+          0.34669269872604574,
+          0.34641365537936397
+        ],
+        "receiver_id": "b0d5ccfc7404",
+        "sha256": "ffc5ad015cbbed3091f67c96232a96af41bc96496d12f8560a02533955dee95e",
+        "tested_windows": 14
+      },
+      {
+        "accepted": true,
+        "accepted_windows": 14,
+        "correlations": [
+          0.7674239942845009,
+          0.7634739163051562,
+          0.7677706491466333,
+          0.7631999339718355,
+          0.7647482535024659,
+          0.7663692346711332,
+          0.7636597491456353,
+          0.7626710098089892,
+          0.7620709457122833,
+          0.7607099576624647,
+          0.7530439793904556,
+          0.727457009948728,
+          0.7459522697198218,
+          0.7542215078664561
+        ],
+        "receiver_id": "f82e0c0ea3e1",
+        "sha256": "297852c6811c79599df759879841f49d6df21ab4afa37bc3ae05c5693e6dc969",
+        "tested_windows": 14
+      }
+    ]
+  },
+  "map_verification": {
+    "anonymous_mf_before": [
+      "obs:live-9c212073-57fb-4823-9ac6-a7836db8069c--59",
+      "obs:live-900194e6-b785-4387-b76e-d59d64dc2a4e-+6"
+    ],
+    "ft8_callsigns": [
+      "KA9SOG",
+      "NF3R"
+    ],
+    "dcf77_unique": 32,
+    "ft8_map_locator_verified": true,
+    "timed_capture": "live-27551b99-4063-40e0-8c6d-db1f89992b68",
+    "timed_unique": 0
+  }
+}

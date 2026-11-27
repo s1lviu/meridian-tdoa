@@ -1,114 +1,77 @@
 # Meridian API
 
-JSON over the same origin as the UI. Times use RFC 3339 with an explicit timezone; the UI sends UTC `Z`. Request bodies are limited to 16 KiB. No permissive CORS is enabled.
+JSON over the same origin as the map. Times are RFC 3339 UTC. Request bodies are limited to 16 KiB (256 KiB for `/api/detections`). No permissive CORS.
 
 | Method | Route | Purpose |
 |---|---|---|
-| GET | `/api/health` | Process health |
-| GET | `/api/ready` | Readiness; 503 while stopping, otherwise version and worker state |
-| GET | `/api/info` | Public configuration, datasets and pending captures; no token |
-| GET | `/api/sources` | Paginated public directory and exclusion reasons |
-| GET | `/api/beacons` | Official channel and callsign order, server UTC and mapped receiver directory entries with HF eligibility |
-| GET | `/api/activity` | Shared live FT8/WSPR report counts by mode, band and two-letter transmitter field |
-| GET | `/api/emissions` | Geographic, temporal, band and origin filtering |
-| GET | `/api/emissions/{id}` | Full result, all receiver observations and evidence |
-| GET | `/api/emissions/{id}/evaluation` | Post-hoc distances to the published reference for each solution of a verified live observation |
-| POST | `/api/replay` | Open a cached result or reprocess an allowed local dataset |
-| POST | `/api/capture` | Capture a configured eligible target; administrator bearer token |
-| POST | `/api/review` | Attach emission-specific eligibility evidence; administrator token |
-| POST | `/api/directory/refresh` | Refresh directory, respecting the 1800 s cache; administrator token |
+| GET | `/api/health`, `/api/ready` | Process health; readiness with version, `busy` and free workers |
+| GET | `/api/info` | Public configuration, targets, bundled recordings, newest live observation |
+| GET | `/api/tracks` | Emitter registry: fused positions with 95% ellipses (`since`, `band`, `bbox`) |
+| GET | `/api/tracks/{key}` | One emitter with its contributing observations |
+| GET | `/api/emissions` | Observations by time, band, mode and viewport |
+| GET | `/api/emissions/{id}` | One observation with every receiver, pair and evidence |
+| GET | `/api/emissions/{id}/evaluation` | Post-hoc distance to the hold-out reference, where one exists |
+| GET | `/api/stats` | Per profile and band, counts and fixes/h, P50/P90 errors, 68%/95% coverage, publication latency (`start`, `end`) |
+| GET | `/api/stream` | Server-sent `change` events when observations or tracks change |
+| GET | `/api/receivers/health` | Fair-use ledger: per-receiver successes, failures, block state, minutes in 24 h |
+| GET | `/api/clocks` | Node clock filters (reference-emitter synchronization) |
+| GET | `/api/sources`, `/api/beacons` | Public receiver directory and exclusion reasons |
+| POST | `/api/detections` | Arrival-time reports from own nodes (node bearer token) |
+| POST | `/api/capture` | Capture a configured target now (administrator token) |
+| POST | `/api/replay` | Open or reprocess a bundled recording |
+| POST | `/api/review` | Attach eligibility evidence to a manual capture (administrator token) |
+| POST | `/api/directory/refresh` | Refresh the receiver directory (administrator token) |
 | GET | `/api/jobs/{id}` | Job status |
 
-## Filtering
+## Observations
 
 ```text
-GET /api/emissions?bbox=-2,45,15,55&band=lf&start=2020-08-13T06:52:20Z&end=2020-08-13T06:52:55Z&mode=replay&scenario=normal
+GET /api/emissions?mode=live&compact=true&start=2026-11-27T18:00:00Z&end=2026-11-27T19:00:00Z&band=40m&bbox=-10,35,30,60
 ```
 
-- `bbox=west,south,east,north`: WGS84 degrees; west > east crosses the antimeridian. Intersection checks polygons, not just centres.
-- `band` accepts `all`, `lf`, `mf`, `hf` and the amateur bands in `/api/info.band_ranges_mhz`. The digital map also groups unclassified reports under `other`.
-- `start`, `end`: half-open interval, start < end.
-- `mode`: `replay` (default) or `live`.
-- `scenario`: `normal` or `sync-loss`; injected faults are separate from normal results.
-- `compact=true` returns map contours, capture ID/time, identity, signal profile, confirmed count and contributing receiver IDs. The detail route returns the complete measurement.
+- `band`: `all` (0–6 GHz), `lf`, `mf`, `hf`, `vhf`, `uhf`, `shf` or an amateur band name (`40m`, `2m`, …).
+- `mode`: `live` or `replay`; `scenario`: `normal` or `sync-loss` (fault-injection replays are kept apart).
+- `bbox=west,south,east,north` filters by region polygons; `west > east` crosses the antimeridian.
+- `emissions` intersect the viewport; `unlocated` are observations without any region (heard, not located); `monitoring` lists the captured intervals and gaps.
 
-Response fields:
+`status`: `located` (one solution, `estimate`), `undetermined` (`estimate=null`, possibly several `hypotheses`), `no_detection`, `no_verified_beacon`. `reference.profile` identifies how the emission was established: `ft8_v1`, `dcf77_prn_v1`, `correlated_v1`, `mlat_v1`, `ncdxf_cw_v1`.
 
-- `emissions`: estimated regions/hypotheses intersecting the viewport. A contour does not imply a unique position; inspect `status`.
-- `unlocated`: undetermined observations without contours. They cannot be filtered geographically and are not plotted at a receiver or map centre.
-- `total_matching`: detected emissions matching the non-geographic filters.
-- `monitoring.segments`: captured intervals and channels, independent of the viewport.
-- `monitoring.gaps`: the temporal complement of recorded segments in the selected interval.
-- `history` contains up to 120 verified reference observations in compact responses. `signals` lists confirmed receptions for the selected band and interval, grouped by profile, documented callsign and channel. Each unnamed, reviewed emission outside a reference profile keeps its own observation ID. `confirmed_receivers`, `accepted_pair_count` and `pair_count` describe the RF evidence. For a fixed reference beacon, `last_position` can retain an earlier measured contour on the same channel if the latest reception had none. Both arrays are independent of the viewport.
-- `band_stats` compares channels worldwide in the selected UTC interval for compact live requests. Each row includes scheduled attempts, analysed and verified slots, distinct beacons, unique fixes, ambiguous windows, number evaluated and median/P90 error in km. Empty error samples have JSON `null` percentiles. P90 uses the nearest rank.
-- `observatory` is null when scheduling is off. Otherwise `last_jobs` lists the jobs in the latest window and `next_target_ids` gives the next simultaneous bands. `last_job` and `next_target_id` expose the first entries for existing clients.
-- `monitoring.status`: `unmonitored`, `partial` or `captured_channels_only`. None asserts full-band or geographic RF coverage.
+Each estimate carries `center`, the 95% `polygon` and `radius_km`, `residual_us`, the a-posteriori `scale`, `dof` and a local east/north `covariance_km2` `[σee², σen, σnn²]`. Pairs are `delay_us` (arrival B minus A) with `sigma_us`; FT8 pairs come from per-receiver arrival times, so they close cycles exactly.
 
-A failed job or inaccessible source does not add a no-detection observation. `no_detection` requires processed samples and applies only to that detector, channel and interval.
+## Emitter registry
 
-## Result semantics
+`GET /api/tracks?since=2026-11-27T00:00:00Z&band=40m` returns `tracks[]` with `track` (`key`, `callsign`, `profile`, `band`, `frequency_hz`, `center`, `covariance_km2`, `fixes`, `rejected`, `first_utc`, `last_utc`, `rf_utc`, `observations`) and `ellipse_95` (`major_km`, `minor_km`, `azimuth_deg` of the major axis from north). Keys are `call:<CALLSIGN>` for decoded identities, `ref:DCF77`, or `obs:<observation_id>` for an anonymous emission. Sharing a frequency does not establish transmitter identity. Fixes are fused by covariance intersection; a fix outside the 99.9% gate is counted in `rejected` and not fused.
 
-| Field | Meaning |
-|---|---|
-| `status=located` | One accepted solution; `estimate` contains centre and contour |
-| `status=undetermined` | `estimate=null`; ambiguity may retain distinct `hypotheses` |
-| `status=no_detection` | No emission identified by the documented detector in the recorded channel |
-| `status=no_verified_beacon` | Synchronized samples cover the IBP slot and no receiver passed the callsign verification |
-| `receivers[].confirmed` | An independently verified IBP callsign in that receiver's IQ, or a correlated reception for the other profiles |
-| `receivers[].used` | Actually used in a solution/hypothesis calculation |
-| `synchronized`, `gps_age_max_s`, `reason` | State checked in the recorded IQ |
-| `identity=null` | Display `unknown callsign`; frequency is not identity |
-| `pairs[].delay_us` | Arrival B minus arrival A, in microseconds |
-| `fault_injected=true` | A replay test with GNSS metadata invalidated in memory; RF unchanged |
+## Statistics
 
-The detail route ignores `bbox`, preserving confirmed receivers outside the viewport. Correlation coefficients are not probabilities. Uncertainty contours are model-dependent and not statistically calibrated.
+`GET /api/stats?start=…&end=…` includes every live observation whose RF start falls in the half-open UTC interval. The rate divides the number of unique fixes by the full interval in hours. Error and coverage fields include their evaluation counts and use independent references where available. P50 averages the two middle values for an even sample. P90 uses nearest rank. The 68% coverage uses the local two-dimensional covariance ellipse and the 95% coverage uses the reported contour.
 
-For live DCF77, `reference.profile` identifies a phase code verified against each recorded IQ hash. With four or more contributing receivers, `reference.three_receivers` also lists the three IDs selected by the largest normalized triangle area, with ties broken by stable receiver ID order. Its `solutions` use measured delays from the same capture. An empty array carries a reason when available. Multiple solutions retain all compatible hypotheses. This comparison leaves the full-network result and its identity intact.
+`publication_latency_count`, `median_publication_latency_s` and `p90_publication_latency_s` measure from RF time to the first stored fix. Importing archived observations does not establish an original publication time. A node network without a UTC master can report relative delays but supplies no absolute RF latency. The map also shows RF-to-display time for new observations received on an open foreground tab, measured after the rendering frame. This session metric depends on the client clock.
 
-## Digital activity
+## Push updates
 
-The live map opens with TDoA transmitter positions. `/?station=DCF77` opens the current measurement of that reference station and follows its band. `/?station=CS3B&band=20m` follows the callsign on 20 metres and shows a waiting message when the selected interval contains no confirmed reception on that band. `/?view=activity`, `/?field=KN` and the receiver links enable the reception overlay.
+`GET /api/stream` is an `EventSource` stream. Each `change` event carries `{"latest_live", "live_rows", "tracks_updated"}`; the map refreshes on it instead of polling. Streams end when the server shuts down.
 
-`GET /api/activity` provides the live digital layer independently of IQ results. It includes `enabled`, broker connection state and connection time, the rolling UTC window, the total number of distinct reporting stations and a `bands` array. Each mode/band row has its report count, distinct reporter count, latest UTC time and counts by two-letter Maidenhead field. Reports with a missing or invalid transmitter locator contribute only to totals. A map link such as `/?field=KN` opens a whole field.
+## Node detections
 
-## Directory
+```http
+POST /api/detections
+Authorization: Bearer <node token>
 
-`GET /api/beacons` serves the five-channel schedule and the worldwide receiver directory. Entries with published coordinates appear in one of two arrays. Each `receiver_pool` entry has `id`, `label`, `position` as `[latitude,longitude]` and its eligible HF beacon `bands`. The `other_receivers` array supplies the first exclusion `reason` and the directory's reported GPS and channel counts. Both describe the directory at `directory_utc`. The live map links to each receiver with `?receiver=<id>`. Transmitter positions come from synchronized observations.
-
-```text
-GET /api/sources?offset=0&limit=30&eligible=false&search=PE1NOD
+{"frequency_hz": 145800000, "detections": [{"node": "n0", "signal": "beacon-42", "local_s": 1795852525.0012345, "sigma_s": 1e-7}]}
 ```
 
-At most 200 entries per response. `next_offset: null` ends pagination. Metadata age, API allowances, candidates and exclusions are returned. Directory `reception_confirmed` is always false; only processed IQ can establish reception.
+The token must match a configured node's `token_sha256` and every detection must name that node. Reports with the same nominal frequency and signal identifier are processed after 2 s of inactivity. A late report within 120 s can update the same observation. The local FT8 detector uses the decoded payload and slot in the identifier. A configured reference updates the clock filters. Other reports can produce `mlat_v1` observations. See [nodes](NODES.md).
 
-## Jobs and authentication
-
-```json
-{"dataset_id":"dcf77-20200813","fault_receiver":null}
-```
-
-Send this to `POST /api/replay`. Use `"fault_receiver":"pa0rdt"` for the GNSS-loss replay. Existing results are accessible without a token and return `cached: true`. Any uncached processing requires an administrator token; use `force: true` to explicitly recompute. Paths cannot be supplied by the client.
+## Capture and jobs
 
 ```http
 POST /api/capture
-Authorization: Bearer <administrator-token>
-Content-Type: application/json
+Authorization: Bearer <administrator token>
 
-{"target_id":"dcf77-validation","source_ids":["ID1","ID2","ID3"]}
+{"target_id": "ft8-20m", "source_ids": ["ID1", "ID2", "ID3", "ID4"]}
 ```
 
-`source_ids` is optional. Manual capture uses the target's configured receivers when omitted. IDs resolve to directory entries. A single processing job runs at a time and conflicts return 409. DCF77 requires phase verification on every recorded receiver for automatic processing. Shared IBP captures always go through the slot verifier. Their jobs include `capture_id`, `sampled_slots`, `verified_slots`, `captured_receivers` and verified `emission_ids`. Each verified detail has `reference.cw` with IQ hashes and per-receiver scores. For IBP, `pairs[].windows` counts matched Morse keying edges. A whole shared-channel capture cannot be promoted through `/api/review`.
+`source_ids` (3–12 directory ids) is optional. Several jobs can run at once (`max_parallel_jobs`) on disjoint receivers; a full house returns 409. Jobs are durable: `running`, `completed`, `awaiting_review`, `failed`, `interrupted` (after a restart; never retried automatically). Slot profiles (`ft8_v1`, `ncdxf_cw_v1`) and channels (`correlated_v1`) report `sampled_slots`/`decodes`/`messages`/`multi_receiver`/`located` or `segments`/`detected`/`located`.
 
-```http
-POST /api/review
-Authorization: Bearer <administrator-token>
-Content-Type: application/json
-
-{"capture_id":"live-<UUID>","evidence":{"url":"https://<actual-evidence>","note":"How this evidence links this exact recording to an eligible emission"},"identity":null}
-```
-
-A separately verified identity can include `callsign` and its own `evidence`. These are operator assertions; the service does not claim to automatically verify the content of external evidence pages.
-
-Jobs are durable: `running`, `completed`, `awaiting_review`, `failed`, `interrupted`. On restart, unfinished jobs become `interrupted`, without automatic retry. `persistence_error` means the final state could not be saved; an HTTP response alone does not establish durability. Captures pending review are rediscovered from disk. The API neither deletes captures nor exposes raw IQ downloads.
-
-Provide a token of at least 24 characters through `MERIDIAN_ADMIN_TOKEN_FILE` or `MERIDIAN_ADMIN_TOKEN`. Compose generates it in `.secrets/runtime.env`; Render generates it through the Blueprint. Use HTTPS for remote administration. Tokens are not returned by the API or persisted by the browser.
+The administrator token (≥24 characters) comes from `MERIDIAN_ADMIN_TOKEN_FILE` or `MERIDIAN_ADMIN_TOKEN`; it is never returned or stored by the browser.

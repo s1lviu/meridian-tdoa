@@ -1,83 +1,92 @@
 # Deployment and operation
 
-The native instance acquired and localized the live DCF77 time signal on four receivers on 27 November 2026. Each hosting instance needs its own transport and storage checks. [Render setup](RENDER.md) and [hosting alternatives](HOSTING.md) describe deployment.
+[Back to Meridian](../README.md) · [Render](RENDER.md) · [Hosting options](HOSTING.md)
 
-## Docker on a server
-
-The supplied `deploy/cloud-init.yaml` installs Docker on Ubuntu 24.04. On a server you administer:
-
-1. Allow inbound TCP 80/443 and restrict SSH to administrator addresses.
-2. Point a domain's DNS A record at the server. Caddy requests TLS certificates after DNS resolves correctly.
-3. Clone this repository into a directory owned by the deployment user and run:
+## Run
 
 ```sh
-./scripts/deploy.sh your-domain.example
+MERIDIAN_CONFIG=config/production.json cargo run --release --locked
 ```
 
-The script creates `.secrets/runtime.env` with restricted permissions and an administrator token, builds the image, starts Compose and checks HTTPS readiness. Do not publish the token in Git or a URL. The public map is read-only; capture, uncached reprocessing, review and manual directory refresh require the token.
+All mutable state lives under `data/` (`data/meridian.sqlite`, `data/captures/`, `data/inbox/`). One process writes it; run a single instance. On first start, a former JSON archive (`data/results`, `data/jobs`) is imported once into SQLite.
 
-Compose uses UID 10001, a read-only root filesystem, a persistent data volume, rotated logs, readiness checks, resource limits and graceful shutdown. Caddy terminates TLS; port 3000 is bound only to localhost. This architecture supports one application instance writing to the archive.
+With Docker, `scripts/deploy.sh your-domain.example` builds the image, generates an administrator token in `.secrets/runtime.env` and starts Compose behind Caddy (TLS). The container runs as UID 10001 with a read-only root filesystem; `/app/data` must be a persistent volume.
 
-Validate resource enforcement on the actual host. In the managed development Docker environment, a requested 1 GiB memory/128-process limit was not applied: the cgroup reported 16 GiB and unlimited processes. Non-root operation, a read-only filesystem and readiness were verified. See `evidence/deployment-checks.json`. The pinned Rust/Python base manifests include Linux ARM64, but no ARM hosting acceptance run has been completed.
-
-## Live configuration
-
-`config/production.json` includes a DCF77 commissioning target and the five NCDXF/IARU beacon frequencies. Its fixed receiver list serves DCF77 and manual captures. The HF monitor selects from the worldwide directory at each attempt.
-
-- `permission.basis: published_api`: recheck positive `ext_api` and `tdoa_ch` directly on every capture, together with band, availability, GNSS and antenna metadata. A published allowance is not a reserved channel. Zero or missing permission is not accepted.
-- Other permission bases require documented authorization and a future `expires_utc`; expired authorizations fail closed. `expires_utc` is not used as an invented operator promise for `published_api`.
-- Positions are operator-reported, associated with antenna metadata and compared against `/status`. The 1 km allowance is a conservative assumption, not an independent phase-centre survey. Antenna/cable delays are not calibrated.
-- `gps_offset_valid_until_utc` requires a fresh GPS–UTC offset review. The bundled 18 s offset follows IERS Bulletin C72, with a conservative revalidation deadline of **1 January 2027**; do not extend it without checking the current bulletin.
-- `verification: dcf77_prn_v1` matches the PTB PRN code on every saved receiver: at least four 2 s windows, normalized correlation ≥0.65 in ≥80% of windows, at least three receivers. Frequency alone never verifies an emission. Automatic live identity remains unknown.
-- `verification: ncdxf_cw_v1` processes ten-second GNSS-aligned transmissions independently. Each receiver must match the complete scheduled Morse callsign and first power dash. A single verified receiver can establish reception. Position requires independent receivers, accepted differential delays and a bounded solution. [Controller timing](https://www.ncdxf.org/beacon/beaconcontroller.html)
-- Other documented public beacons or participating amateur stations use manual capture-specific RF review.
-
-### Scheduled public observatory
-
-The production profile runs one worker for all visitors. The same settings work in a native live configuration.
+## The monitor
 
 ```json
 "monitor": {
   "target_id": "dcf77-validation",
-  "additional_target_ids": ["ibp-20m", "ibp-17m", "ibp-15m", "ibp-12m", "ibp-10m"],
-  "interval_s": 73,
-  "directory_receivers": 8,
+  "additional_target_ids": ["ft8-20m", "ft8-40m", "msf-channel", "ft8-30m", "dcf77-channel", "ft8-17m", "ft8-15m", "am-648khz", "am-5mhz"],
+  "interval_s": 60,
+  "directory_receivers": 12,
   "parallel_bands": 2
 }
 ```
 
-Every 73 seconds the worker schedules two of the six targets for simultaneous 30-second IQ captures. The rotation advances by the number of scheduled targets, covering all six in three windows. Each target gets its own job, manifest, UTC overlap and receiver set. Fixed LF receivers take precedence when LF is scheduled. The HF pool rotates through eligible locations, and each receiver has one assignment per window. The group limit of eight bounds the solver's exhaustive subset search. The worker reserves the combined archive allowance and cooldown before opening receivers. `parallel_bands` defaults to one in older configurations and may be set up to the number of configured monitor targets.
+Every `interval_s` the monitor opens a window of `parallel_bands` targets on disjoint receivers; windows run in the background, so the next one starts on time while earlier ones are still processing (`max_parallel_jobs`, default 2). Windows with an FT8 target start 4 s before a 15 s UTC boundary so a full slot is recorded.
 
-The production profile also sets `digital_reports` to true. One independent server connection receives FT8 and WSPR reports over TLS from `mqtt.pskreporter.info:1884` with exponential reconnect delays. The server retains counters for the current UTC minute and the preceding 14 minutes in memory. Reports expire during outages and collection resumes on reconnect. Digital reports run independently of the IQ archive quota and scheduler. [Feed and attribution](https://www.mqtt.pskreporter.info/)
+Directory-driven targets alternate reconnaissance with measurement. Reconnaissance rotates a geographic anchor. A generic-channel probe lasts up to 15 s. Measurement ranks sites by recent per-receiver RF strength on that channel, checks the first triangle for collinearity and favours the configured spacing. The scheduler progressively relaxes spacing if few sites are eligible. Two independent silent windows inside six hours remove a site from that channel temporarily. Reprocessing a recording counts as the original listen. The scheduler uses receiver coordinates and reception history.
 
-The world view distinguishes the current schedule, measured receptions and TDoA fixes. Visitors can open any of the 18 beacon entries and inspect its verified bands in the chosen interval. The page reads shared results every eight seconds. No receiver connections are opened by a visitor browsing the map.
+Targets and their verification profiles:
 
-Omit `additional_target_ids` for a single target. Set `directory_receivers` to zero to use configured receiver IDs. Omit `monitor` for administrator-triggered captures only. Supported intervals range from 60 to 86,400 seconds. Scheduled and manual captures share one worker and the on-disk cooldown. Missed windows are skipped. A full archive, persistence failure or expired GPS–UTC validation pauses scheduling. Each receiver's permission is checked at acquisition time. Directory refresh is cached for at least 30 minutes.
+| Profile | Kind | What establishes an emission |
+|---|---|---|
+| `dcf77_prn_v1` | `public_time_reference` | PTB phase code matched in each receiver's IQ; failing receivers are withheld, ≥3 must pass |
+| `ft8_v1` | `amateur_digital` | FT8 decoded from our own IQ (CRC-14 + LDPC); identity from the message |
+| `correlated_v1` | `monitored_channel` | CFAR-occupied sub-band correlated between synchronized receivers; identity unknown |
+| `ncdxf_cw_v1` | `public_beacon` | Scheduled IBP callsign matched against all 18 Morse patterns |
 
-## Required acceptance on the chosen host
+## Fair use of public receivers
 
-The earlier container run could retrieve `/status` but failed to acquire IQ. The native run subsequently captured synchronized IQ. Test from the actual deployment host because a successful metadata response establishes only reachability of that endpoint.
+KiwiSDR operators publish whether external software may connect (`ext_api`) and offer TDoA channels (`tdoa_ch`); many also enforce a per-IP daily time limit. Meridian:
 
-Before declaring the deployment operational for live measurements:
+- checks `/status` (access policy, GNSS, antenna, free channels) immediately before every connection;
+- keeps one connection per receiver at a time, at least `min_gap_s` (60 s) apart;
+- budgets `daily_minutes` (60) of connection time per receiver per rolling 24 h;
+- backs off exponentially after failures (10 min doubling, at most 24 h) and honours explicit refusals. Per-IP limits and password requirements set a 24 h block, a receiver reporting downtime sets at least 1 h and busy channels set at least 10 min.
 
-1. Capture an eligible public reference simultaneously on at least three independent receivers. Retain source checks, original IQ, hashes, capture outcomes and RF eligibility verification.
-2. Verify common UTC overlap, synchronization in IQ blocks, correlation, geometry and browser results. Ambiguity remains **Position undetermined**.
-3. Test lost synchronization on a separately labelled replay; never mutate the original capture or call a fault injection live evidence.
-4. Evaluate the known reference position only after localization. Do not use it to choose a solution or search region.
-5. Verify resource limits, restart recovery and backup restoration on that hosting instance.
-
-## Storage, backup and recovery
-
-All mutable state is under `/app/data` in Docker. A disk must cover this entire path, including IQ, manifests, results, jobs and directory state. Unfinished jobs become `interrupted` after a forced stop and are not retried. State is written with fsync and atomic rename. Missing intervals never become no-detection observations.
-
-For Compose deployments:
-
-```sh
-./scripts/backup.sh /path/to/meridian-backup.tar.gz
+```json
+"receivers": {"daily_minutes": 60, "min_gap_s": 60}
 ```
 
-The script stops the worker, saves a consistent volume archive, verifies it and restarts the worker. Store a copy outside the instance. Keep configuration and the administrator secret separately. To restore, stop the app, restore the verified archive with UID/GID 10001, start it and check readiness, jobs and results. Never use `docker compose down -v` for an update: it deletes volumes.
+`/api/receivers/health` shows the ledger. The earlier monitor, which had no such budget, exhausted several European receivers' daily limits within hours; that is why these rules exist.
 
-The IQ archive quota defaults to 2 GiB (`MERIDIAN_CAPTURE_QUOTA_BYTES`). Each attempt conservatively reserves up to 64 MiB per receiver. Captures are refused before quota exhaustion; no automatic deletion occurs. At 10,000 jobs, archival is required. Multi-instance deployment requires shared storage and worker coordination and is not supported by the current single-writer design.
+## Storage and retention
 
-For updates, keep volumes and secrets, review source policies and the UTC-offset deadline, run the checks, then `docker compose up -d --build --wait`. Preserve a verified backup and the previous image digest for rollback.
+```json
+"retention": {
+  "verified_iq_hours": 24,
+  "unverified_iq_hours": 0,
+  "capture_metadata_days": 30,
+  "job_days": 30,
+  "result_days": 90,
+  "negative_result_days": 7
+}
+```
+
+- Raw IQ of a capture with nothing worth keeping (no verified callsign, no transmission timed at two receivers, no correlated emission) is deleted as soon as processing ends. Verified IQ stays 24 h.
+- Small evidence files (manifest, source checks, verifier scores, hashes) stay 30 days.
+- Observations stay 90 days; coverage-only rows (nothing detected) 7 days; jobs 30 days.
+- `MERIDIAN_CAPTURE_QUOTA_BYTES` (default 2 GiB) is a rolling quota: concurrent CLI and server captures reserve space before recording. The oldest eligible IQ is evicted first. A full quota skips a window and the scheduler tries again at its next interval.
+
+The SigMF importer shares the capture quota. In-progress captures hold a filesystem reservation. A background sweep applies the retention rules every ten minutes. Back up `data/meridian.sqlite` with SQLite's online backup (`sqlite3 data/meridian.sqlite ".backup backup.sqlite"`) or stop the service and copy `data/`.
+
+## Clock and time
+
+`gps_utc_offset_s` (18 s) and `gps_offset_valid_until_utc` must follow the current IERS Bulletin C; capture refuses to start after the revalidation date. Kiwi IQ blocks carry GNSS timestamps checked in every block; SigMF nodes declare their time source and uncertainty.
+
+## Acceptance on a new host
+
+1. `cargo test --locked`, `python3 tests/detections.py target/release/meridian-tdoa`, `npm run test:browser`.
+2. One manual capture per profile (`meridian-tdoa capture <target> --directory 12`), then `process`, and check `/api/receivers/health` for refusals.
+3. `meridian-tdoa calibrate` (DCF77) and `meridian-tdoa calibrate ft8` once data exists: they score stored observations against the hold-out references.
+4. Check retention: unverified captures keep only JSON after processing.
+
+## Deployment scope
+
+The native release has served stored over-the-air LF, MF and FT8 fixes from an isolated database copy. A Linux container deployment requires an image build on an available Docker daemon and persistent storage mounted at `/app/data`. The supplied Render Free Blueprint declares no disk. The volunteer monitor's long-run yield and latency need measurement on the chosen host and its receiver network. Use the per-band counts, coverage, receiver ledger and latency fields to evaluate that deployment.
+
+Physical commissioning of a regional network requires simultaneous recordings or arrival reports from surveyed receiver sites and a separate hold-out transmitter. Public Kiwi coverage, a simulated GPSDO and regional MLAT tests exercise different portions of that system. [Field results](VALIDATION.md)
+
+The RF pilot identifies local FT8 messages and DCF77, and can locate a sufficiently correlated anonymous sub-band. The broader architecture also proposed a WSPR decoder, automatic modulation classification, explicit delay–Doppler search and a propagation model fitted to HF paths. Those capabilities remain future work. Current HF field evidence covers the 40 m FT8 channel and a 5 MHz anonymous-channel trial. [Method and validation](VALIDATION.md)

@@ -1,26 +1,29 @@
-# Public source evidence
+# Live sources: public KiwiSDRs and how Meridian uses them
 
-FT8 reports arrive through the PSK Reporter all-band FT8 subscription. WSPR reports come through the broker's consolidated WSPRnet.org, WSPRnet.eu, WSPR.live and PSK Reporter feed. Meridian aggregates the transmitter's published field and counts reporting stations with process-local hashes. The report time is `t_tx` when present, otherwise `t`. Reports can arrive late or in bursts. These counters describe reported radio activity. Position and accuracy calculations use independent synchronized IQ. [Feed schema, timing and terms](https://www.mqtt.pskreporter.info/) · [WSJT-X modes](https://wsjt.sourceforge.io/wsjtx-main_en.html)
+[Back to Meridian](../README.md)
 
-The documented public mirror is `https://cdn.aethersdr.com/kiwi.json`, schema 1. Meridian does not poll every receiver in a loop or use the centralized KiwiSDR TDoA service's special exemption.
+Meridian's live input is IQ it records itself. Spot networks (PSK Reporter, WSPRnet, reverse beacon feeds) are not used for positions, activity or anything else.
 
-Primary contracts:
+## Directory
 
-- [Directory schema](https://github.com/aethersdr/AetherSDR/blob/main/docs/kiwi-json-schema.md)
-- [Public mirror and operator API policy](https://github.com/aethersdr/AetherSDR/blob/main/docs/kiwisdr-public-directory.md)
+Receiver metadata comes from the documented public mirror `https://cdn.aethersdr.com/kiwi.json` (schema 1, cached ≥30 min). A receiver is a candidate only if its operator publishes positive `ext_api` and `tdoa_ch`, GNSS is healthy (`gps_good ≥ 4`, `fixes_min > 0`), a channel is free, the antenna is connected and documented, the position is valid and the endpoint is plain HTTP on a public host. Directory metadata is never evidence of reception: `/status` is checked again right before each connection and synchronization again in every recorded IQ block.
 
-The stored snapshot `evidence/live/directory.json` is dated **2026-11-26 19:00:13 UTC** and contains **827** receivers, of which **677** publish `ext_api > 0`. Zero disables external API access; a missing field is not permission. The UI retains excluded entries and reasons without claiming RF reception.
+## Fair use
 
-The later directory update used in the container API test, dated **20:00:13 UTC**, has **828** entries, **677** positive API allowances and **256** metadata candidates. These counts are recorded in `evidence/release-api-tests.json`; they are not numbers of simultaneous receptions.
+Volunteer receivers are shared with listeners. Meridian keeps one connection per receiver at a time, at least 60 s apart, at most 60 minutes per receiver per 24 h, backs off after failures and honours refusals: a receiver that reports its per-IP time limit (`ip_limit`), all channels busy, a password requirement or "down" is blocked for that period. The native Rust SND client records refusal codes directly. A configured HTTP CONNECT proxy selects pinned KiwiClient before the connection. Set `MERIDIAN_KIWI_TRANSPORT=kiwiclient` to select it explicitly. For this transport, `scripts/kiwi_transport.py` echoes just those lines so Meridian can act on them, and refuses any second connection attempt or redirect to another endpoint.
 
-Six `/status` endpoints were checked directly (`evidence/live/status-*.json`). Five passed preflight; the Fenu-Radio receiver reported only two good GNSS sources and was excluded. Operator-published redirects to port 8073 and Kiwi proxy2 were checked as canonical endpoints. Redirects to another receiver are rejected. Operator contact email values have been redacted in the public status evidence; no measurement field was changed.
+Observed on 27 November 2026, from one residential IP, after the earlier monitor had run for six hours without a budget:
 
-`evidence/live/transport-check.json` records the container connection attempts on 26 November 2026. That run acquired no IQ. Direct connections were refused, a CONNECT tunnel closed during the WebSocket handshake and a proxy Upgrade request returned HTTP 403. The failing layer was not conclusively identified. Directory metadata and preflight GPS are not substitutes for IQ.
+- the `*.proxy.kiwisdr.com` relay (and `kiwisdr.com` itself) refused every connection, removing 135 of the 268 then-eligible receivers;
+- several European receivers answered `ip_limit: 120` (minutes per 24 h);
+- of 85 receivers tried during the FT8 runs, 23 delivered IQ; the rest failed preflight (mostly GNSS reported unavailable) or delivered nothing.
 
-On 27 November the native server acquired DCF77 IQ from four synchronized receivers in consecutive scheduled windows and verified its phase code. [Live LF measurements](VALIDATION.md#live-lf-observations)
+A real-time map of many transmitters cannot rest on borrowed channels alone. The receiver budget keeps Meridian a polite guest; [own nodes](NODES.md) are how coverage grows.
 
-The worldwide HF monitor samples the published NCDXF/IARU channels on 20, 17, 15, 12 and 10 metres. The directory supplies candidate receiver positions and access metadata. GNSS-stamped IQ supplies the callsign evidence and differential arrival times. Per-band receiver rotation uses receiver geometry alone. [Beacon schedule](https://www.ncdxf.org/beacon/) · [Live HF measurements](VALIDATION.md#live-hf-observations)
+## Kiwi IQ
 
-The functional-test recording remains the real **13 August 2020 DCF77** dataset from hcab14/TDoA. The RF verifier matches its IQ against the PRN sequence in [PTB-Mitteilungen 114 (2004), section 4.3, figures 7–8](https://www.ptb.de/cms/fileadmin/internet/fachabteilungen/abteilung_4/4.4_zeit_und_frequenz/4.42/dcf77.pdf). The first six tested windows per receiver score 0.862–0.895. Synthetic pure-carrier and noise cases fail the 0.65 threshold. These checks demonstrate archived-data behaviour, not current reception or a universal false-positive rate.
+The Rust client uses one WebSocket session per authorized receiver and preserves its IQ blocks and sequence. The 12 kHz and 20/20.25 kHz Kiwi modes are supported. Wide captures are anti-alias filtered before resampling. Kiwi IQ WAV files carry a GNSS timestamp (`kiwi` chunk: GPS seconds of week, nanoseconds, solution age) before every block of samples. Meridian discards the first second, unwraps the GPS week, rejects stale solutions (age > 2 s), discontinuities or unstable rates, and resamples every receiver onto one common 12 kHz UTC grid with a Kaiser-windowed sinc interpolator. Receivers whose timestamps go backwards are excluded with the reason recorded.
 
-IERS and status evidence retain their observation dates. Policies and receiver state must be checked again for each acquisition, followed by GNSS and correlation checks in the actual recorded samples.
+## Provenance kept per capture
+
+`source-checks.json` (each receiver's `/status` at capture time, contact e-mail removed), `capture-outcomes.json`, per-receiver recorder logs, `manifest.json` with SHA-256 of every IQ file, and the verifier's evidence (`verification.json`, `ft8-verification.json`, `channel-detection.json` or `ibp-verification.json`). These small files stay 30 days; raw IQ follows the [retention rules](PRODUCTION.md#storage-and-retention).

@@ -1,117 +1,104 @@
-# Validation with real IQ
+# Method and validation
 
-## Simultaneous bands and live digital reports
+[Back to Meridian](../README.md)
 
-On 27 November 2026 four receivers recorded the 24.930 MHz channel (12 m) and six others recorded the 28.200 MHz channel (10 m). All four on 12 m and five on 10 m had continuous GNSS timing for both ten-second slots beginning at **13:31:40 and 13:31:50 UTC**. The capture manifests `live-97bf006c-f7c8-4813-80cc-bbd2b6011722` and `live-0704c266-e8f7-462f-a557-451cd277deda` contain ten distinct physical receiver IDs. The two slots on each band yielded zero verified callsigns and zero TDoA fixes.
+Everything below was measured on real IQ recorded by public KiwiSDRs on **27 November 2026**, or on the bundled 2020 DCF77 recording, unless marked *synthetic*. Errors are post-hoc distances to references the solver never sees: the published DCF77 position (PTB), the published IBP beacon locators, or the locator an FT8 station sent in its own message. Synthetic tests check algorithms and geometry; they are not evidence of live accuracy.
 
-At **13:38:44 UTC** the digital feed had supplied 224,273 FT8 reports and 53,692 WSPR reports from 5,463 distinct reporting stations within the live UTC window. Nineteen named amateur bands had activity. The two-letter field **KN** (20–40° E, 40–50° N), which includes Romania and neighbouring countries, accounted for 15,170 FT8 reports and 759 WSPR reports. The digital layer uses transmitter locators from the feed. Its counts measure reception reports, which can include multiple reports of one transmission. [Feed documentation and attribution](https://www.mqtt.pskreporter.info/)
+## Summary
 
-## Live HF observations
+| Signal | Observations | Unique fixes | Error vs reference | 95% region contains it |
+|---|---:|---:|---|---:|
+| DCF77 77.5 kHz, four receivers | 32 windows | 32 | median **10.5 km**, P90 13.7 km, max 14.4 km | **32/32** |
+| FT8 40 m, 5–12 receivers requested | 595 payload/slot observations from 16 captures, 78 timed at ≥4 receivers with a sent locator | **2** | **194 km**, **274 km** | 2/2 |
+| IBP beacons, CW keying edges (retired method) | 769 slots | 0 | — | — |
+| Anonymous monitored channels | 9 windows on LF, MF and HF | **2** on 648 kHz | no independent transmitter identity | — |
 
-On 27 November 2026 the 20 m capture `live-061e8100-8de7-46ec-ab4e-6270d7cbc51e` identified **CS3B at 13:41:20 UTC** on four independent receivers. Two of the six receiver pairs passed the differential-delay checks. A second live capture (`live-c36b379d-4f59-4ba1-a3d8-e33e8eee0ab6`, **14:05:20 UTC**) again confirmed CS3B on four receivers. Zero of its six pairs passed. Both observations appear as heard with undetermined position. A separate 20 m capture `live-e914a0fb-606c-42c5-9693-83ee39fc380c` verified **ZL6B at 14:00:40 UTC** on one receiver and **VK6RBP at 14:00:50 UTC** on two. Each ten-second emission was evaluated independently.
+The scale follows physics. LF ground wave travels along the surface at a stable speed: kilometres. HF reaches distant receivers by one or more ionospheric hops whose extra path differs per receiver, and FT8 is only ~50 Hz wide: a timing error of about a millisecond, hundreds of kilometres per fix. A unique position also needs at least four receivers **around** the transmitter.
 
-On 27 November 2026 the native monitor acquired fresh Kiwi IQ on every International Beacon Project channel. The table covers **12:12:00–12:33:00 UTC**. Each sampled HF slot had at least one receiver with continuous GNSS timing across the complete ten seconds. Counts include one additional operator-requested capture on 17 m.
+## DCF77 (LF ground wave)
 
-| Band | Frequency | Sampled slots | Verified slots | Verified callsign | Unique fixes | Measured error |
-|---|---:|---:|---:|---|---:|---|
-| 20 m | 14.100 MHz | 6 | 1 | VK6RBP | 0 | — |
-| 17 m | 18.110 MHz | 8 | 0 | — | 0 | — |
-| 15 m | 21.150 MHz | 7 | 1 | OA4B | 0 | — |
-| 12 m | 24.930 MHz | 6 | 0 | — | 0 | — |
-| 10 m | 28.200 MHz | 5 | 0 | — | 0 | — |
+Live captures from four receivers (57–261 km from Mainflingen), 11:28–17:31 UTC. Each receiver's IQ must carry the PTB phase code (normalized correlation ≥0.65 in ≥80% of 2 s windows). A capture used to be discarded when one receiver failed this; that happened in **46 of ~83** captures. The failing receiver is now withheld and the capture proceeds (regression test on the real 2020 IQ plus a noise receiver).
 
-**VK6RBP** was verified at 12:12:50 UTC by a KiwiSDR in Marahau, New Zealand. The full-call score was 0.850, the next callsign scored 0.542 and the measured key-to-gap contrast was 16.5 dB. The receiver IQ SHA-256 is `c7b5f72a2cfa9b136cc01421de8267c333fa183125d12a459742241111a800a3`. **OA4B** was verified at 12:30:00 UTC by W2NAF in Spring Brook Township, Pennsylvania. Its IQ SHA-256 is `6cf93ea0857eca14f244b0bb976928fa58b7b4baed22012a353b2ffe406906bd`. Each transmission had one verified receiver. The native archive retains every capture manifest, per-slot evidence and original receiver file.
+`meridian-tdoa calibrate` scores the stored delays at the PTB position:
 
-In a separate 20 m follow-up at **12:36:50 UTC**, receivers in Masterton, the Chatham Islands and Hastings independently verified VK6RBP. Seven receivers delivered IQ. The three pairwise keying-edge scatters were **3.16, 4.67 and 3.55 ms**, all above the 1.5 ms gate. This reception has three confirmed receivers and an undetermined position. At **12:37:00 UTC** the following slot produced **JA2IGY** at a receiver in Rotorua. Both observations are in `live-6938c532-b5ed-40ad-83dc-02c6efb990a4`. Receiver selection for the follow-up used prior reception and receiver positions.
+| Quantity | Value |
+|---|---:|
+| Pair residual at the reference | rms 49 µs, robust σ 38 µs, median −19 µs |
+| Reported pair σ (one-sample floor) | 83.3 µs (normalized rms 0.59: conservative) |
+| Residual level by time of day | ≈60 µs 11:30–13:30, ≈27 µs 14:00–16:00, ≈55 µs after 17:00 |
 
-At **12:41:40 UTC** a receiver in Ihrhove, Germany, verified **4X6TU on 10 m** in capture `live-6a6c7079-3f96-4cb8-a77c-e5ab746a547f`. At **12:44:20 UTC** another receiver verified **CS3B on 20 m**. By 12:51 UTC the service had verified five distinct amateur beacons across three HF bands in 56 analysed slots. Each of the five HF bands had delivered synchronized samples. The monitor was still acquiring data.
+The pairs between the three distant receivers carry biases of 40–100 µs and fail cycle closure by up to ~50 µs, while pairs involving the receiver nearest the transmitter are consistent. That is a delay-estimation effect (cross-correlating two differently distorted signals), not a weighting problem — and it decides the result:
 
-From **12:02 to 13:02 UTC**, 72 sampled HF slots yielded seven verified transmissions from six distinct beacons. Five transmissions were heard at one receiver each. Two receivers verified **ZL6B** on 20 m at **12:51:40 UTC** and supplied one accepted delay. In the VK6RBP window described above, three receivers verified the callsign and all three delay pairs exceeded the scatter limit. These seven transmissions yielded zero unique HF positions. During the same hour, three separate DCF77 windows yielded unique LF positions.
-
-The IQ centre is 700 Hz below the published channel. For each synchronized receiver, Meridian compares all 18 complete Morse patterns over a ±150 Hz carrier search and checks the first power dash. Acceptance requires the scheduled callsign, correlation ≥0.72, a lead of ≥0.10 over the runner-up and key-to-gap contrast ≥5 dB. An unverified slot establishes that the channel was sampled. It provides no evidence for a transmitter marker. [IBP schedule](https://www.ncdxf.org/beacon/) · [Documented keying](https://www.ncdxf.org/beacon/beaconcontroller.html)
-
-Timing between two verified receivers uses matched keying edges. A pair needs at least eight common edges covering at least half the call's edges, robust scatter ≤1.5 ms, waveform agreement and a physically compatible delay. The HF pair uncertainty floor is 1 ms. The global solver checks synchronized geometry and cycle closure. Ionospheric propagation can bias even a well-bounded spherical-model result. Repeated fixes from one beacon can dominate a band's statistics, so the interface also reports distinct beacons and sample size.
-
-Each HF reference is the centre of the published six-character Maidenhead cell. The per-observation evaluation includes distance to that centre and bounds allowing for the cell's farthest corner. The band aggregates count unique solutions only. Ambiguous observations retain all compatible regions in their individual reports. [Published IBP locators](https://www.ncdxf.org/beacon/beaconlocations.html)
-
-## Live LF observations
-
-On 27 November 2026 the native server recorded DCF77 at 77.5 kHz with four independent KiwiSDRs. The following three consecutive scheduled windows passed phase-code verification and produced a unique TDoA solution. The distance to the published PTB position was calculated separately after processing.
-
-| Common UTC interval | Contributing receivers | Distance to reference | Maximum model contour radius |
-|---|---:|---:|---:|
-| 11:28:50.043–11:29:17.306 | 4 | 4.90 km | 35.77 km |
-| 11:31:50.045–11:32:17.287 | 4 | 6.14 km | 35.95 km |
-| 11:34:49.907–11:35:17.198 | 4 | 4.59 km | 35.74 km |
-
-The native IQ archive retains the source checks, WAVs and hash-linked RF evidence for these measurements. This series evaluates one LF channel. Other bands require their own synchronized observations and independent evaluation.
-
-## Replay dataset and provenance
-
-Source: [hcab14/TDoA](https://github.com/hcab14/TDoA/tree/2bb9dc2ecc2c6ebcc13ed11c7cbeadea0cd5dfcd), commit `2bb9dc2ecc2c6ebcc13ed11c7cbeadea0cd5dfcd`. The author explicitly associates these three files with DCF77 in `proc_tdoa_DCF77.m`. Original WAV bytes are not edited.
-
-| Receiver | Published coordinates | SHA-256 |
-|---|---|---|
-| HB9ODP | 46.499351, 8.798828 | `87916f71b32a519d2abb55a85294112adfb4452397af0b0ccf12555ab3ac775d` |
-| JO51xl | 51.466044, 11.977189 | `045c038e7bac3321abe9413d41a8c8d0fa3d60bc7a315a6cdb6a573bc484b702` |
-| pa0rdt | 51.500500, 3.600690 | `90727bc9020b18088228709bbd3e77d0f876db0adcbf9503eb330e7fbc14fc8c` |
-
-Recorded on **2020-08-13 at 77,500 Hz**. Common analysed interval: **06:52:21.801–06:52:50.168 UTC**. Effective sample rates derived from GNSS timestamps are approximately 12,001 Hz. GPS–UTC was 18 s at that date. A fixed rule excludes the first settling second, which contains invalid startup timing in the original files.
-
-Receiver coordinates are published GNSS metadata, not independent antenna phase-centre surveys. The manifest's 1 km allowance is an operational assumption, not measured accuracy. Historical reception at 77.5 kHz does not establish today's bands, API permission or availability.
-
-## Delay measurements
-
-Normalized complex correlation; 14 accepted 2-second windows per pair. Sign convention: arrival B minus arrival A.
-
-| Pair | Delay | Median correlation |
+| Pairs used | Median error | P90 |
 |---|---:|---:|
-| HB9ODP → JO51xl | −427.875 µs | 0.97393 |
-| HB9ODP → pa0rdt | +84.345 µs | 0.97903 |
-| JO51xl → pa0rdt | +513.321 µs | 0.98320 |
+| Only pairs with the nearest receiver (57 km) | 4.7 km | 8.5 km |
+| Only pairs with one of the other receivers | 10.0–20.1 km | 12.2–24.0 km |
+| **All pairs (current solver, no arbitrary choice)** | **10.5 km** | **13.7 km** |
 
-The timing sigma floor is **83.333 µs**, one sample at the common 12 kHz rate. It is not a guaranteed experimental accuracy. Correlation coefficients are not probabilities.
+The 4.9 km reported earlier came from the old solver using only the pairs of the alphabetically first receiver, which happened to be the nearest one. With all pairs, the 95% region contains the reference in 32/32 windows (median radius 50 km — conservative).
 
-## Location and measured error
+## FT8 (HF, decoded from our own IQ)
 
-Global search using spherical arc distance at c = 299,792.458 km/s produces two compatible minima:
+Sixteen stored captures on 40 m span 18:34–19:05 UTC. They contain 595 distinct payload/slot observations and 301 decoded transmitter identities. 467 observations were timed at two or more receivers. Up to 12 receivers were requested per capture. Every 15 s slot is decoded at every synchronized receiver (vendored ft8_lib), messages are associated by their 77-bit payload, and every receiver — including those too weak to decode, at ≥10σ — is timed against the waveform rebuilt from the payload.
 
-| Hypothesis | Latitude | Longitude | Distance from PTB reference | Maximum contour radius |
-|---|---:|---:|---:|---:|
-| 1 | 50.012339° | 9.033148° | **1.7883 km** | 39.08 km |
-| 2 | −49.156391° | −173.692373° | **19,798.1022 km** | 56.58 km |
+- A first two-receiver test (Tremolat FR – Oberwölbling AT, 1150 km): 41 messages, 27 timed at both. Against the stations' sent locators the delay residuals have a **median of 945 µs**, while the jackknife σ has a median of **840 µs** — the uncertainty is honest. Wildly wrong delays (−138 ms, −12.9 ms) are rejected by the physical-limit test.
+- 78 messages were timed at four or more receivers and carried a locator. **Two** gave a unique position under the 4000 km region cap: **KA9SOG** (EN52) **194 km** from its square's centre (95% region 854 km) and **NF3R** (FN20) **274 km** (1543 km), both located by mostly North-American receivers around them.
+- Re-solving all 78 without the cap (`meridian-tdoa calibrate ft8`), 20 give a bounded region; their 95% regions contain the locator centre in **18/20**; their errors span 31 km to 14,000 km (median 2238 km), because most stations lay outside the small receiver groups — such geometry determines a direction, not a distance.
 
-The independent evaluation reference is **50°01′03″ N, 09°00′34″ E**. The replay evaluation script and the live evaluation dialog use it after the solver finishes. The published rounding limits the precision of the comparison. [PTB, maßstäbe 1, page 23](https://www.ptb.de/cms/fileadmin/internet/publikationen/masstaebe/Hefte_Komplett_PDF/mst01.pdf)
+FT8 can be mapped where receivers surround the active stations; most of the time, with the public receivers available, it is "heard, position undetermined".
 
-**The three-receiver replay has an undetermined position.** The 1.79 km error belongs to one hypothesis. Selecting it because it is near DCF77 would contaminate the evaluation. Contours are conditional on the model and do not calibrate ionospheric propagation, dispersion, antenna offsets or cable delays.
+## Earlier HF method (retired)
 
-Resolving ambiguity requires additional independent evidence, such as a fourth simultaneous receiver with useful geometry, or an operating domain/model justified independently of the known transmitter. No Europe-only domain was imposed to remove the distant hypothesis. A synthetic four-receiver test is explicitly a geometry test, not a real accuracy result.
+From 12:12 to 17:32 UTC the previous monitor sampled 769 IBP beacon slots. It verified 45 (5.9%), mostly by one receiver; 37 delay pairs from CW keying edges, 3 within the 1.5 ms scatter gate (median scatter 2.9 ms ≈ 870 km); **zero** fixes. Keying edges of a ~50 Hz CW signal cannot time to better than milliseconds, and geography-only receiver clusters rarely heard the beacon. FT8's matched filter on the full waveform replaces it; IBP identification remains available.
 
-## Synchronization loss
+## Anonymous emissions on LF, MF and HF
 
-- `fault_receiver=pa0rdt` preserves the RF samples and invalidates that receiver's GNSS state in memory.
-- RF reception remains correlated, but the receiver is excluded from localization.
-- Only **2/3 receivers remain synchronized**: `estimate=null`, `hypotheses=[]`, `status=undetermined`.
-- Rust tests separately corrupt a GNSS block in a temporary WAV copy (age 255), introduce a 1 ms timestamp jump and test truncation.
-- This is software fault injection on real IQ, not an observed physical GNSS outage during live acquisition.
+The correlated-channel profile examined every occupied sub-band. A correlated sub-band has at least one accepted inter-receiver delay. A unique fix requires a bounded single region supported by at least four receivers. “IQ” counts delivered recordings before timing and correlation checks. Capture identifiers, per-receiver IQ hashes, accepted delays and estimated centres are in the [field evidence](../evidence/live/rf-channel-validation.json).
 
-## Automated and browser evidence
+| UTC start | Channel | IQ | Occupied | Correlated | Unique |
+|---|---:|---:|---:|---:|---:|
+| 19:40:58 | 77.5 kHz | 3 | 27 | 3 | 0 |
+| 19:42:35 | 77.5 kHz | 5 | 7 | 3 | 0 |
+| 19:44:14 | 60 kHz | 4 | 6 | 1 | 0 |
+| 19:45:53 | 60 kHz | 3 | 10 | 0 | 0 |
+| 19:47:31 | 60 kHz | 3 | 27 | 0 | 0 |
+| 19:53:01 | 648 kHz | 5 | 22 | 5 | 1 |
+| 19:53:43 | 5000 kHz | 4 | 9 | 0 | 0 |
+| 20:19:34 | 648 kHz | 4 | 29 | 5 | 1 |
+| 20:24:27 | 648 kHz | 4 | 32 | 4 | 0 |
 
-The English interface and messages are checked using the existing real-data tests. Reports contain their actual execution timestamps:
+At 19:53, four receivers constrained a 1.84 kHz wide sub-band near 648.006 kHz to a region centred at 51.90° N, 2.55° E with maximum 95% radius 438 km. A second four-receiver result at 20:19, acquired using the native Rust Kiwi client, was centred at 52.06° N, 1.08° E with maximum radius 970 km. The archived receiver coordinates, pair delays and timing uncertainties permit independent re-solving of both observations. Broadcast frequency alone does not establish which co-channel transmitter was heard or its location error. At 20:24 four recordings on the same channel produced four correlations and zero unique positions.
 
-- `evidence/rust-tests.txt`: 15 tests covering parsing, timing, access policy, provenance, geometry, real IQ, PRN verification and job recovery.
-- `evidence/transport-tests.txt`: a local dummy server verifies that the KiwiClient adapter makes no second connection attempt; no RF is involved.
-- `evidence/browser-tests.json`: Chromium checks for map intersection, receiver details outside the viewport, band/UTC filters, explicit ambiguity, GNSS loss, authentication, directory metadata, browser headers and a 390 px responsive layout.
-- `evidence/desktop.png`, `evidence/mobile.png`, `evidence/sync-loss.png`: screenshots from the browser test.
-- `evidence/validation.json`: separate post-hoc evaluation; `evidence/replay-result.json` and `evidence/sync-loss-result.json` are actual processing outputs.
+An isolated copy of the live database served both MF observations and both FT8 tracks to the map. The FT8 inspector displayed the locator calculated from the estimated position. Hardware-timestamped simulated reports also exercised delivery into an already-open browser and the session latency indicator. The open-tab 648 kHz trial at 20:24 yielded no position to time.
 
-Earlier container acceptance reports from **26 November 2026** are retained separately: `release-api-tests.json` records two authenticated release-mode real-IQ jobs; `deployment-checks.json` records persistence across container replacement and verifies UID 10001, a read-only root filesystem and readiness. It explicitly reports that requested cgroup limits were not enforced by that managed development environment. These timestamped reports are not a claim that a cloud provider has been deployed or tested.
+The 32 identified DCF77 fixes contained the PTB position in both the 68% ellipse and the 95% contour in 32/32 cases. The two FT8 fixes contained their respective **locator centres** in both regions. These samples give observed coverage on the recorded receiver geometries. The HF comparison has just two values, and the amateur locator is a grid square rather than an independently surveyed antenna.
 
-Compose and Caddy configuration validation does not issue a TLS certificate. Render Blueprint schema validation does not create a Render instance. The PRN classifier passes the three real recordings and rejects synthetic carrier/noise cases; one historical dataset does not establish a universal false-positive rate.
+A separate DCF77 commissioning attempt at 20:28 UTC delivered four IQ files. The automatic phase-code verification did not qualify this window, so it added no DCF77 position or field latency sample.
 
-## Open operational criteria
+## Bundled recording (2020, three receivers)
 
-1. Repeat simultaneous live IQ acquisition and RF verification on each public hosting instance.
-2. Propagation-model scope and antenna/cable calibration sufficient for the intended operating conditions.
-3. Actual hosting deployment, resource enforcement, backup restoration and restart acceptance.
-4. Measure and repeat unique HF beacon fixes with simultaneous, independently verified receivers and consistent differential delays on each band.
+hcab14/TDoA, 13 August 2020, DCF77 at HB9ODP, JO51xl and pa0rdt. Pair delays −427.89, +84.35 and +513.32 µs (sinc resampling; 2 s windows). Three receivers leave two mirror solutions: **50.017° N, 9.029° E (1.4 km from the PTB reference, 95% region 51 km)** and 49.13° S, 173.75° W. The result stays **undetermined**: choosing the hypothesis near DCF77 because it is near DCF77 would contaminate the evaluation. Invalidating one receiver's GNSS state in memory (`fault_receiver=pa0rdt`) leaves two synchronized receivers and no region.
+
+## Synthetic verification (algorithms, not live accuracy)
+
+| Check | Result |
+|---|---|
+| Solver Monte Carlo, five receivers, per-receiver and pair-specific noise | 95% region contains truth in 60/60 |
+| Matched-filter timing, exact fractional delays in noise | rms error / jackknife σ = 1.04 (40 trials) |
+| FT8 decoding of upstream WSJT-X recordings | 4/5 and 16/24 messages |
+| FT8 TDoA, five Kiwi-format receivers with independent sample clocks | 0.64 km |
+| SigMF, five 48 kSPS nodes, unknown 2 kHz emitter | 0.08 km |
+| Edge nodes reporting FT8 arrivals, server association | 0.81 km |
+| Five free-running clocks (±5 ms, ±40 ppm) synchronized from a reference emitter | 29 m; unsynchronized: no fix |
+| Node detections through a real server process (`tests/detections.py`) | 33 m, track registered, push event received |
+
+## Uncertainty model
+
+Pair delays are reduced by least squares to n−1 independent differences whose covariance combines pair noise (scaled up when cycles do not close) with a per-receiver timing term; the position fit uses this generalized covariance on the WGS84 ellipsoid and is scaled up (never down) by its own χ²/(n−3). The 95% region is the Δχ² = 5.991 contour; a local east/north covariance feeds the emitter registry, which fuses fixes by covariance intersection so that errors shared between fixes of one station (ionosphere, antennas) are never assumed to average out.
+
+## Not established
+
+- Absolute accuracy for the anonymous 648 kHz emissions. Both have a measured region and no independently established source identity.
+- Stable accuracy across propagation conditions, a unique broadband 5 MHz result, or FT8 accuracy on bands beyond 40 m.
+- Physical GPSDO/PPS node performance and regional VHF/UHF accuracy. The SoapySDR library was tested with a software driver, and the regional server with simulated arrivals.
+- Antenna and cable delays are not calibrated; receiver positions are operator-reported.
