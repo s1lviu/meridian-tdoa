@@ -78,6 +78,29 @@ const polygon = (est) => est.polygon.map((p) => [p.lat, p.lon]);
 const label = (e) => e.identity?.callsign || (e.profile === "dcf77_prn_v1" ? "DCF77" : PROFILE[e.profile] ? `${PROFILE[e.profile]} ${freq(e.frequency_hz)}` : freq(e.frequency_hz));
 const trackName = (t) => t.callsign || (t.key === "ref:DCF77" ? "DCF77" : freq(t.frequency_hz));
 
+// Four-character Maidenhead cell computed only from the measured fix.
+function locatorCell(p) {
+  const x = Math.floor((((p.lon + 180) % 360 + 360) % 360) / 2);
+  const y = Math.min(179, Math.max(0, Math.floor(p.lat + 90)));
+  const letters = String.fromCharCode(65 + Math.floor(x / 10), 65 + Math.floor(y / 10));
+  const south = y - 90, west = 2 * x - 180;
+  return { name: letters + (x % 10) + (y % 10), south, west, center: [south + 0.5, west + 1] };
+}
+const gridDisplay = (profile, call) => profile === "ft8_v1" || (profile === "mlat_v1" && !!call);
+const positionText = (p, grid) => grid ? "Locator " + locatorCell(p).name : fmt(p.lat, 3) + "°, " + fmt(p.lon, 3) + "°";
+
+// The displayed bounds cover the whole confidence region, rounded out to cell edges.
+function displayRegion(points, center, grid) {
+  if (!grid) return points;
+  const cell = locatorCell(center);
+  const lats = points.map(([lat]) => lat).concat(cell.south, cell.south + 1);
+  const lons = points.map(([, lon]) => center.lon + ((lon - center.lon + 540) % 360) - 180);
+  const west = Math.min(cell.west, 2 * Math.floor(Math.min(...lons) / 2));
+  const east = Math.max(cell.west + 2, 2 * Math.ceil(Math.max(...lons) / 2));
+  const south = Math.floor(Math.min(...lats)), north = Math.ceil(Math.max(...lats));
+  return [[south, west], [north, west], [north, east], [south, east]];
+}
+
 function interval() {
   if (state.mode === "replay") {
     const d = state.info?.datasets?.[0];
@@ -88,24 +111,66 @@ function interval() {
   return [new Date(Date.now() - hours * 3600e3).toISOString(), new Date(Date.now() + 60e3).toISOString()];
 }
 
+// Measure only newly drawn observations received while this live view is visible.
+let viewScope = "", visibleSince = 0, lastDrawn = new Set();
+let paintSamples = [];
+function resetPaintWindow() {
+  viewScope = "";
+  visibleSince = Date.now();
+  lastDrawn.clear();
+}
+document.addEventListener("visibilitychange", () => {
+  resetPaintWindow();
+  if (!document.hidden && state.mode === "live") refresh();
+});
+function measureMap(scope, start, stats) {
+  const current = new Set(), arrived = [];
+  for (const {track} of state.tracks) {
+    const id = track.observations.at(-1);
+    const at = Date.parse(track.last_utc);
+    current.add(id);
+    if (scope !== viewScope || !track.rf_utc || at < visibleSince || lastDrawn.has(id)) continue;
+    const hz = track.frequency_hz;
+    const band = track.band || (hz < 300e3 ? "LF" : hz < 3e6 ? "MF" : hz < 30e6 ? "HF" : hz < 300e6 ? "VHF" : hz < 3e9 ? "UHF" : "SHF");
+    arrived.push({profile: track.profile, band, at, id});
+  }
+  if (scope !== viewScope) visibleSince = Date.now();
+  viewScope = scope;
+  lastDrawn = current;
+  paintSamples = paintSamples.filter(s => s.at >= Date.parse(start));
+  if (!arrived.length || document.hidden) return;
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    if (scope !== viewScope || document.hidden) return;
+    const seen = Date.now();
+    for (const sample of arrived) {
+      if (seen >= sample.at && !paintSamples.some(x => x.id === sample.id)) {
+        paintSamples.push({...sample, seconds: (seen - sample.at) / 1000});
+      }
+    }
+    drawStats(stats);
+  }));
+}
+
 async function refresh() {
   if (state.refreshing) { state.pending = true; return; }
   state.refreshing = true;
   try {
     const [start, end] = interval();
     const band = $("band").value;
-    const q = `mode=${state.mode}&compact=true&start=${start}&end=${end}&band=${band}&scenario=${state.scenario}`;
-    const named = !["all", "lf", "mf", "hf", "vhf", "uhf"].includes(band);
-    const tasks = [api(`/api/emissions?${q}`)];
-    if (state.mode === "live") tasks.push(api(`/api/tracks?since=${start}&band=${named ? band : "all"}`), api(`/api/stats?start=${start}&end=${end}`));
-    const [data, tracks, stats] = await Promise.all(tasks);
-    state.data = data;
     const profile = $("profile").value;
+    const scope = [state.mode, band, profile, $("window").value].join("/");
+    const q = `mode=${state.mode}&compact=true&start=${start}&end=${end}&band=${band}&scenario=${state.scenario}`;
+    const tasks = [api(`/api/emissions?${q}`)];
+    if (state.mode === "live") tasks.push(api(`/api/tracks?since=${start}&band=${band}`), api(`/api/stats?start=${start}&end=${end}`));
+    const [data, tracks, stats] = await Promise.all(tasks);
+    if (scope !== [state.mode, $("band").value, $("profile").value, $("window").value].join("/")) { state.pending = true; return; }
+    state.data = data;
     state.tracks = (tracks?.tracks || []).filter((t) => profile === "all" || t.track.profile === profile || (profile === "dcf77_prn_v1" && t.track.key === "ref:DCF77"));
     drawTracks();
     drawFixes(profile);
     drawLists(profile);
     drawStats(stats?.rows || []);
+    if (state.mode === "live") measureMap(scope, start, stats?.rows || []);
     if (state.mode === "live") {
       const obs = data.monitoring?.segments?.length || 0;
       const next = data.observatory?.next_at ? ` · next window ${utc(data.observatory.next_at).slice(11, 19)}` : data.observatory?.notice ? ` · ${data.observatory.notice}` : "";
@@ -128,12 +193,15 @@ function drawTracks() {
   tracksLayer.clearLayers();
   for (const { track: t, ellipse_95: el } of state.tracks) {
     const name = trackName(t);
-    const shape = L.polygon(ellipse(t.center, el.major_km, el.minor_km, el.azimuth_deg), { color: "#5fd4a6", weight: 2, fillOpacity: 0.18 });
+    const grid = gridDisplay(t.profile, t.callsign);
+    const region = displayRegion(ellipse(t.center, el.major_km, el.minor_km, el.azimuth_deg), t.center, grid);
+    const shape = L.polygon(region, { color: "#5fd4a6", weight: 2, fillOpacity: 0.18 });
     shape.on("click", () => selectTrack(t.key));
     shape.bindTooltip(`${esc(name)} · ${t.fixes} fix(es) · ±${km(el.major_km)}`, { sticky: true });
     shape.addTo(tracksLayer);
-    L.circleMarker([t.center.lat, t.center.lon], { radius: 4, color: "#e8fff7", weight: 1, fillColor: "#5fd4a6", fillOpacity: 1, className: "tx-point" }).on("click", () => selectTrack(t.key)).addTo(tracksLayer);
-    L.marker([t.center.lat, t.center.lon], { interactive: false, icon: L.divIcon({ className: "tx-label", html: esc(name), iconSize: null, iconAnchor: [-8, 6] }) }).addTo(tracksLayer);
+    const marker = grid ? locatorCell(t.center).center : [t.center.lat, t.center.lon];
+    if (!grid) L.circleMarker(marker, { radius: 4, color: "#e8fff7", weight: 1, fillColor: "#5fd4a6", fillOpacity: 1, className: "tx-point" }).on("click", () => selectTrack(t.key)).addTo(tracksLayer);
+    L.marker(marker, { interactive: false, icon: L.divIcon({ className: "tx-label", html: esc(name), iconSize: null, iconAnchor: [-8, 6] }) }).addTo(tracksLayer);
   }
 }
 
@@ -143,7 +211,8 @@ function drawFixes(profile) {
   for (const e of state.data.emissions) {
     if (profile !== "all" && e.profile !== profile) continue;
     for (const est of e.estimate ? [e.estimate] : e.hypotheses) {
-      const p = L.polygon(polygon(est), { color: e.estimate ? "#7cc7ff" : "#c79bff", weight: 1.2, dashArray: e.estimate ? null : "5 4", fillOpacity: 0.05, className: e.estimate ? "fix-region" : "hypothesis-region" });
+      const region = displayRegion(polygon(est), est.center, gridDisplay(e.profile, e.identity?.callsign));
+      const p = L.polygon(region, { color: e.estimate ? "#7cc7ff" : "#c79bff", weight: 1.2, dashArray: e.estimate ? null : "5 4", fillOpacity: 0.05, className: e.estimate ? "fix-region" : "hypothesis-region" });
       p.bindTooltip(`${esc(label(e))} · ${utc(e.start_utc)} · ${e.estimate ? "single fix" : "ambiguous"}`, { sticky: true });
       p.on("click", () => selectObservation(e.id));
       p.addTo(fixes);
@@ -176,15 +245,20 @@ function drawLists(profile) {
   $("heard-count").textContent = rows.length;
 }
 
+const pct = (x) => x == null ? "—" : fmt(100 * x) + "%";
+
 function drawStats(rows) {
   const body = $("stats-body");
   body.innerHTML = "";
   for (const r of rows.sort((a, b) => b.located - a.located || b.heard - a.heard)) {
     const tr = document.createElement("tr");
-    tr.innerHTML = `<td>${esc(PROFILE[r.profile] || r.profile)} · ${esc(r.band)}</td><td>${r.heard}</td><td>${r.timed_two_plus}</td><td>${r.located}</td><td>${km(r.median_error_km)}</td><td>${r.contour_coverage == null ? "—" : fmt(100 * r.contour_coverage) + "%"}</td>`;
+    const values = paintSamples.filter(s => s.profile === r.profile && s.band === r.band).map(s => s.seconds).sort((a,b) => a-b);
+    const mid = Math.floor(values.length / 2);
+    const median = values.length ? (values[mid] + values[Math.floor((values.length - 1) / 2)]) / 2 : null;
+    tr.innerHTML = `<td>${esc(PROFILE[r.profile] || r.profile)} · ${esc(r.band)}</td><td>${r.heard}</td><td>${r.timed_two_plus}</td><td>${r.located}</td><td>${fmt(r.fixes_per_hour, 2)}</td><td>${km(r.median_error_km)} / ${km(r.p90_error_km)}</td><td>${pct(r.ellipse_68_coverage)} / ${pct(r.contour_coverage)}</td><td>${r.median_publication_latency_s == null ? "—" : fmt(r.median_publication_latency_s, 1) + " s"}</td><td class="paint-delay">${median == null ? "—" : fmt(median, 1) + " s (" + values.length + ")"}</td>`;
     body.append(tr);
   }
-  if (!rows.length) body.innerHTML = `<tr><td colspan="6" class="note">${state.mode === "live" ? "No live observation in this window." : "Live statistics only."}</td></tr>`;
+  if (!rows.length) body.innerHTML = `<tr><td colspan="9" class="note">${state.mode === "live" ? "No live observation in this window." : "Live statistics only."}</td></tr>`;
 }
 
 function inspector(html) {
@@ -203,14 +277,14 @@ async function selectTrack(key) {
     receivers.clearLayers();
     const obs = d.observations.map((o) => `<div class="rx-row"><span class="rx-dot ${o.estimate ? "used" : "heard"}"></span><button class="link" data-id="${esc(o.id)}">${esc(utc(o.start_utc))}</button><span>${o.estimate ? `±${km(o.estimate.radius_km)}` : esc(o.status)}</span></div>`).join("");
     inspector(`<h3>${esc(trackName(t))}</h3><p class="sub">${esc(PROFILE[t.profile] || t.profile || "")} · ${esc(t.band || "")} · ${freq(t.frequency_hz)}</p>
-      <dl><dt>Position</dt><dd>${fmt(t.center.lat, 3)}°, ${fmt(t.center.lon, 3)}°</dd>
+      <dl><dt>Position</dt><dd>${positionText(t.center, gridDisplay(t.profile, t.callsign))}</dd>
       <dt>95% ellipse</dt><dd>${km(el.major_km)} × ${km(el.minor_km)}, axis ${fmt(el.azimuth_deg)}°</dd>
       <dt>Fused fixes</dt><dd>${t.fixes} (gate rejected ${t.rejected})</dd>
       <dt>Seen</dt><dd>${esc(utc(t.first_utc))} → ${esc(utc(t.last_utc))}</dd></dl>
       <p class="note">Covariance intersection of successive fixes: shared ionospheric and antenna errors are not assumed to average out.</p>
       <h4>Contributing observations</h4>${obs}`);
     for (const b of document.querySelectorAll("#inspector .link")) b.onclick = () => selectObservation(b.dataset.id);
-    map.fitBounds(ellipse(t.center, el.major_km, el.minor_km, el.azimuth_deg), { padding: [40, 40], maxZoom: 9 });
+    map.fitBounds(displayRegion(ellipse(t.center, el.major_km, el.minor_km, el.azimuth_deg), t.center, gridDisplay(t.profile, t.callsign)), { padding: [40, 40], maxZoom: 9 });
   } catch (e) { notify(e.message); }
 }
 
@@ -242,11 +316,11 @@ async function selectObservation(id) {
       <p><span class="status-pill ${status}">${status === "located" ? "Located" : status === "undetermined" ? "Position undetermined" : "No detection"}</span></p>
       ${e.reason ? `<p class="note">${esc(e.reason)}</p>` : ""}
       ${ft8 ? `<dl><dt>Message</dt><dd>${esc(ft8.message)}</dd><dt>Heard by</dt><dd>${ft8.receivers.filter((r) => r.decoded).length} decoded · ${ft8.receivers.filter((r) => r.arrival_s != null).length} timed</dd></dl>` : ""}
-      ${ests.map((s, i) => `<dl><dt>${ests.length > 1 ? "Hypothesis " + (i + 1) : "Estimate"}</dt><dd>${fmt(s.center.lat, 3)}°, ${fmt(s.center.lon, 3)}°</dd><dt>95% region</dt><dd>${km(s.radius_km)} max radius</dd><dt>Residual</dt><dd>${us(s.residual_us)} rms${s.scale ? ` · scale ${fmt(s.scale, 2)}` : ""}</dd></dl>`).join("")}
+      ${ests.map((s, i) => `<dl><dt>${ests.length > 1 ? "Hypothesis " + (i + 1) : "Estimate"}</dt><dd>${positionText(s.center, gridDisplay(e.reference?.profile, e.identity?.callsign))}</dd><dt>95% region</dt><dd>${km(s.radius_km)} max radius</dd><dt>Residual</dt><dd>${us(s.residual_us)} rms${s.scale ? ` · scale ${fmt(s.scale, 2)}` : ""}</dd></dl>`).join("")}
       <h4>Receivers</h4>${rx}${e.excluded?.length ? `<p class="note">${e.excluded.length} receiver(s) excluded by the RF verifier.</p>` : ""}
       <h4>Pair delays (B − A)</h4>${pairs || '<p class="note">No pair of timed receivers.</p>'}${evaluation}
       <p class="note">${esc(e.provenance?.note || "")}</p>`);
-    const bounds = [...ests.flatMap(polygon), ...e.receivers.map((r) => [r.position.lat, r.position.lon])];
+    const bounds = [...ests.flatMap((s) => displayRegion(polygon(s), s.center, gridDisplay(e.reference?.profile, e.identity?.callsign))), ...e.receivers.map((r) => [r.position.lat, r.position.lon])];
     if (bounds.length) map.fitBounds(bounds, { padding: [50, 50], maxZoom: 9 });
   } catch (err) { notify(err.message); }
 }
@@ -261,6 +335,7 @@ async function waitJob(id) {
 }
 
 function setMode(mode) {
+  resetPaintWindow();
   state.mode = mode;
   state.selected = null;
   state.scenario = "normal";
@@ -341,7 +416,7 @@ function stream() {
   if (!window.EventSource) return;
   const es = new EventSource("/api/stream");
   es.onopen = () => { state.stream = "open"; };
-  es.onerror = () => { state.stream = "reconnecting"; if (state.mode === "live") setStatus("Live updates reconnecting…", "warn"); };
+  es.onerror = () => { resetPaintWindow(); state.stream = "reconnecting"; if (state.mode === "live") setStatus("Live updates reconnecting…", "warn"); };
   let timer;
   es.addEventListener("change", () => {
     clearTimeout(timer);
