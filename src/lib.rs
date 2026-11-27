@@ -1,4 +1,5 @@
 pub mod bands;
+pub mod calibration;
 pub mod capture;
 pub mod db;
 pub mod directory;

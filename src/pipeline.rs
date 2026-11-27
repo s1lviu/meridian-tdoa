@@ -282,21 +282,26 @@ pub(crate) fn locate_receptions(e: &mut Emission) {
         for &i in &best {
             e.receivers[i].used = true;
         }
-        // Pairwise cycle closure detects mutually incompatible delays.
-        let dt = |a: usize, b: usize| {
+        // Pairwise cycle closure detects grossly incompatible delays (5σ, at least 250 µs).
+        let pair = |a: usize, b: usize| {
             e.pairs
                 .iter()
                 .find(|p| p.a == e.receivers[a].receiver.id && p.b == e.receivers[b].receiver.id)
                 .unwrap()
-                .delay_us
         };
         let mut consistent = true;
         for a in 0..best.len() {
             for b in a + 1..best.len() {
                 for c in b + 1..best.len() {
-                    if (dt(best[a], best[b]) + dt(best[b], best[c]) - dt(best[a], best[c])).abs()
-                        > 250.
-                    {
+                    let (ab, bc, ac) = (
+                        pair(best[a], best[b]),
+                        pair(best[b], best[c]),
+                        pair(best[a], best[c]),
+                    );
+                    let limit = (5.
+                        * (ab.sigma_us.powi(2) + bc.sigma_us.powi(2) + ac.sigma_us.powi(2)).sqrt())
+                    .max(250.);
+                    if (ab.delay_us + bc.delay_us - ac.delay_us).abs() > limit {
                         consistent = false;
                     }
                 }
@@ -305,12 +310,16 @@ pub(crate) fn locate_receptions(e: &mut Emission) {
         if consistent {
             match geo::locate(&e.receivers, &e.pairs) {
                 Ok(mut solutions) => {
-                    if solutions.len() == 1 {
+                    if solutions.len() == 1 && best.len() >= 4 {
                         e.estimate = solutions.pop();
                         e.status = "located".into();
                     } else {
                         e.hypotheses = solutions;
-                        e.reason=Some("Global search found two or more compatible regions. Position undetermined; an additional receiver or an independently justified search domain is required.".into());
+                        e.reason = Some(if best.len() < 4 {
+                            "Three receivers cannot exclude the mirror solution on the globe. Position undetermined; a fourth synchronized receiver is required.".into()
+                        } else {
+                            "Global search found two or more compatible regions. Position undetermined; an additional receiver or an independently justified search domain is required.".into()
+                        });
                     }
                 }
                 Err(err) => e.reason = Some(err.to_string()),

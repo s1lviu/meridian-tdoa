@@ -96,6 +96,16 @@ pub struct Estimate {
     pub residual_us: f64,
     pub geometry_score: f64,
     pub uncertainty_note: String,
+    /// χ² at the centre, its degrees of freedom and the a-posteriori variance factor applied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chi2: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dof: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale: Option<f64>,
+    /// Gaussian approximation in a local east/north frame: [σee², σen, σnn²] in km².
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub covariance_km2: Option<[f64; 3]>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

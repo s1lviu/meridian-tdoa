@@ -11,7 +11,7 @@ use meridian_tdoa::{
     db::{self, Db},
     directory, geo, ibp,
     model::*,
-    pipeline, retention, store,
+    pipeline, protocol, retention, store,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -881,12 +881,50 @@ fn migrate(db: &Db) -> anyhow::Result<(usize, usize)> {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args: Vec<_> = std::env::args().collect();
+    // An unknown word must never fall through to starting the server.
+    if let Some(cmd) = args.get(1) {
+        anyhow::ensure!(
+            ["discover", "process", "capture", "calibrate"].contains(&cmd.as_str()),
+            "Unknown command {cmd}. Use: discover | process MANIFEST [FAULT_RECEIVER] | capture TARGET_ID | calibrate"
+        );
+    }
     if args.get(1).is_some_and(|v| v == "discover") {
         let d = directory::refresh(Path::new("data/state/directory.json")).await?;
         println!(
             "{}",
             json!({"total":d.receivers.len(),"api_allowed":d.receivers.iter().filter(|r|r.ext_api.unwrap_or(0)>0).count(),"candidates":d.receivers.iter().filter(|r|r.exclusion().is_none()).count(),"fetched_at":d.fetched_at})
         );
+        return Ok(());
+    }
+    if args.get(1).is_some_and(|v| v == "calibrate") {
+        // Post-hoc only: residuals of stored live DCF77 delays at the published PTB position.
+        let db = Db::open(Path::new("data/meridian.sqlite"))?;
+        let rows = db.emissions(&db::Query {
+            mode: "live".into(),
+            fault: false,
+            low_hz: 77_499.,
+            high_hz: 77_501.,
+            start_ms: 0,
+            end_ms: i64::MAX,
+            limit: 1_000_000,
+        })?;
+        let rows: Vec<_> = rows
+            .into_iter()
+            .filter(|e| {
+                e.reference
+                    .as_ref()
+                    .is_some_and(|r| r.profile == protocol::PROFILE)
+            })
+            .collect();
+        let truth: Point = serde_json::from_str(include_str!("../web/dcf77-reference.json"))?;
+        let report = json!({
+            "reference": truth,
+            "wgs84": meridian_tdoa::calibration::residuals(&rows, truth, geo::distance),
+            "sphere": meridian_tdoa::calibration::residuals(&rows, truth, geo::sphere_distance),
+            "solver": meridian_tdoa::calibration::solver(&rows, truth),
+            "formulations": meridian_tdoa::calibration::formulations(&rows, truth),
+        });
+        println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(());
     }
     if args.get(1).is_some_and(|v| v == "process") {
