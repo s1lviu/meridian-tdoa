@@ -1,0 +1,44 @@
+{
+  "passed": true,
+  "utc": "2026-11-26T21:21:11.589052+00:00",
+  "image": "sha256:d789c6dedd4da9889278f4eaafd5dfef4bc46a805bf40016628096f23dc1d15e",
+  "checks": [
+    "latest image starts with bind-mounted production config",
+    "completed real-IQ jobs and both results survived container removal/recreation on the persistent volume",
+    "readiness on port 3000 and latest_live=null",
+    "non-root UID 10001 and read-only root filesystem",
+    "final documentation-only image update preserves jobs and serves corrected validation text"
+  ],
+  "restored_jobs": [
+    {
+      "job_id": "45e7c785-91b1-4cfa-88e2-d786986dfe53",
+      "emission_id": "dcf77-20200813",
+      "hypotheses": 2
+    },
+    {
+      "job_id": "91cb8ab5-120e-42db-80ce-07f5d3fa245d",
+      "emission_id": "dcf77-20200813-sync-loss",
+      "hypotheses": 0
+    }
+  ],
+  "ready": {
+    "busy": false,
+    "status": "ready",
+    "version": "0.2.0"
+  },
+  "container_health": "healthy",
+  "uid": "10001",
+  "read_only": true,
+  "requested_limits": {
+    "memory_bytes": 1073741824,
+    "pids": 128
+  },
+  "actual_cgroup": {
+    "memory_max": "17179869184",
+    "pids_max": "max"
+  },
+  "limits_enforced": false,
+  "live_rf_validated": false,
+  "public_deployment": false,
+  "tested_processing_image": "sha256:706b49f7d421abf954b014a1955730d498c19e9e61f5858e67afa225a080dc63"
+}

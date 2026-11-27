@@ -1,0 +1,70 @@
+{
+  "checked_at": "2026-11-26T20:01:11.835660+00:00",
+  "source": {
+    "updated": "Thursday, 26-Nov-2026 18:52:11 GMT",
+    "id": "00aafd2d3947",
+    "status": "active",
+    "offline": false,
+    "name": "0-30 MHz SDR | OZ5OD Hoell Strand. Denmak",
+    "sdr_hw": "KiwiSDR 2 v1.902 ⁣ 📡 GPS ⁣ ⏳ Limits ⁣ 📻 DRM ⁣⁣ 🌀D11.9",
+    "bands": [
+      0,
+      30000000
+    ],
+    "freq_offset": 0,
+    "mode": "rx4.wf4",
+    "users": 0,
+    "users_max": 3,
+    "ext_api": 4,
+    "preempt": 0,
+    "avatar_ctime": 1784767672,
+    "gps": [
+      55.636708,
+      9.737335
+    ],
+    "grid": "JO45up",
+    "gps_good": 7,
+    "fixes": 455628,
+    "fixes_min": 30,
+    "fixes_hour": 1785,
+    "tdoa_id": "",
+    "tdoa_ch": 4,
+    "asl": 20,
+    "loc": "OZ5OD Hoell Strand. Denmak",
+    "sw_version": "KiwiSDR_v1.902",
+    "antenna": "Mini-Whip / 45,1m invertet L",
+    "snr": [
+      36,
+      25
+    ],
+    "ant_connected": true,
+    "sm_cal": -16,
+    "wf_cal": -11,
+    "adc_ov": 3239,
+    "clk_ext_freq": 66665900,
+    "clk_ext_gps": [
+      0,
+      1
+    ],
+    "uptime": 929387,
+    "gps_date": [
+      0,
+      0
+    ],
+    "date": "Thu Nov 26 18:52:11 2026",
+    "ip_blacklist": "2dbe9dff",
+    "dx_file": "878,708a5341,52435",
+    "debian": "D11.9",
+    "url": "http://22902.proxy.kiwisdr.com",
+    "seq": 118,
+    "snr_all": 36,
+    "snr_hf": 25,
+    "flagged": false
+  },
+  "url": "http://22902.proxy.kiwisdr.com/status",
+  "body": "status=active\noffline=no\nname=0-30 MHz SDR | OZ5OD Hoell Strand. Denmak\nsdr_hw=KiwiSDR 2 v1.902 ⁣ 📡 GPS ⁣ ⏳ Limits ⁣ 📻 DRM ⁣\nop_email=[redacted: contact not required for RF validation]\nbands=0-30000000\nfreq_offset=0.000\nmode=rx4.wf4\nusers=0\nusers_max=3\next_api=4\npreempt=0\navatar_ctime=1784767672\ngps=(55.636708, 9.737335)\ngrid=JO45up\ngps_good=9\nfixes=457653\nfixes_min=30\nfixes_hour=1761\ntdoa_id=\ntdoa_ch=4\nasl=20\nloc=OZ5OD Hoell Strand. Denmak\nsw_version=KiwiSDR_v1.902\nantenna=Mini-Whip / 45,1m invertet L\nsnr=34,22\nant_connected=1\nsm_cal=-16\nwf_cal=-11\nadc_ov=3239\nclk_ext_freq=66665900\nclk_ext_gps=0,1\nuptime=933527\ngps_date=0,0\ndate=Thu Nov 26 20:01:11 2026\nip_blacklist=2dbe9dff\ndx_file=878,708a5341,52435\n",
+  "error": null,
+  "redactions": [
+    "operator contact email (op_email); measurement fields unchanged"
+  ]
+}

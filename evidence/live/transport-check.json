@@ -1,0 +1,14 @@
+{
+  "checked_at": "2026-11-26T20:10:25.312059+00:00",
+  "directory_count": 827,
+  "external_api_allowance_published": 677,
+  "status_checks": 6,
+  "preflight_passed": 5,
+  "raw_iq_captured": false,
+  "transport_results": [
+    "Direct KiwiClient TCP connections refused in managed environment.",
+    "HTTP CONNECT established but closed on plaintext websocket handshake.",
+    "Standard HTTP proxy WebSocket Upgrade returned HTTP 403, server envoy."
+  ],
+  "conclusion": "RF live capture not validated in this environment. No synthetic or status data was promoted to RF reception. Production host must support outbound Kiwi WebSocket transport."
+}

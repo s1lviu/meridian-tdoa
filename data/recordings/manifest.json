@@ -1,0 +1,71 @@
+{
+  "id": "dcf77-20200813",
+  "title": "DCF77 · reference recording",
+  "kind": "public_time_reference",
+  "emission_verified": true,
+  "mode": "replay",
+  "frequency_hz": 77500,
+  "capture_utc": "2020-08-13T06:52:20Z",
+  "gps_utc_offset_s": 18,
+  "provenance": {
+    "url": "https://github.com/hcab14/TDoA/tree/2bb9dc2ecc2c6ebcc13ed11c7cbeadea0cd5dfcd",
+    "note": "Real IQ published by hcab14/TDoA in proc_tdoa_DCF77.m; GPL-3.0. Recorded in 2020, not live. Public time reference used for commissioning; this is not an amateur-radio beacon dataset."
+  },
+  "identity": {
+    "callsign": "DCF77",
+    "evidence": {
+      "url": "https://github.com/hcab14/TDoA/blob/2bb9dc2ecc2c6ebcc13ed11c7cbeadea0cd5dfcd/proc_tdoa_DCF77.m",
+      "note": "The author explicitly associates these three files with DCF77. Identity comes from dataset provenance, not inferred position or frequency alone."
+    }
+  },
+  "receivers": [
+    {
+      "id": "HB9ODP",
+      "label": "HB9ODP",
+      "independent_device": "HB9ODP",
+      "position": {
+        "lat": 46.499351,
+        "lon": 8.798828
+      },
+      "position_uncertainty_m": 1000,
+      "position_evidence": {
+        "url": "https://github.com/hcab14/TDoA/blob/2bb9dc2ecc2c6ebcc13ed11c7cbeadea0cd5dfcd/gnss_pos/HB9ODP.txt",
+        "note": "Receiver GNSS coordinates published by the author. Exact antenna position and cable delay are undocumented. The declared 1 km operational allowance is an assumption, not verified accuracy."
+      },
+      "file": "20200813T065220Z_77500_HB9ODP_iq.wav",
+      "sha256": "87916f71b32a519d2abb55a85294112adfb4452397af0b0ccf12555ab3ac775d"
+    },
+    {
+      "id": "JO51xl",
+      "label": "JO51xl",
+      "independent_device": "JO51xl",
+      "position": {
+        "lat": 51.466044,
+        "lon": 11.977189
+      },
+      "position_uncertainty_m": 1000,
+      "position_evidence": {
+        "url": "https://github.com/hcab14/TDoA/blob/2bb9dc2ecc2c6ebcc13ed11c7cbeadea0cd5dfcd/gnss_pos/JO51xl.txt",
+        "note": "Receiver GNSS coordinates published by the author. Exact antenna position and cable delay are undocumented. The declared 1 km operational allowance is an assumption, not verified accuracy."
+      },
+      "file": "20200813T065220Z_77500_JO51xl_iq.wav",
+      "sha256": "045c038e7bac3321abe9413d41a8c8d0fa3d60bc7a315a6cdb6a573bc484b702"
+    },
+    {
+      "id": "pa0rdt",
+      "label": "pa0rdt",
+      "independent_device": "pa0rdt",
+      "position": {
+        "lat": 51.5005,
+        "lon": 3.60069
+      },
+      "position_uncertainty_m": 1000,
+      "position_evidence": {
+        "url": "https://github.com/hcab14/TDoA/blob/2bb9dc2ecc2c6ebcc13ed11c7cbeadea0cd5dfcd/gnss_pos/pa0rdt.txt",
+        "note": "Receiver GNSS coordinates published by the author. Exact antenna position and cable delay are undocumented. The declared 1 km operational allowance is an assumption, not verified accuracy."
+      },
+      "file": "20200813T065220Z_77500_pa0rdt_iq.wav",
+      "sha256": "90727bc9020b18088228709bbd3e77d0f876db0adcbf9503eb330e7fbc14fc8c"
+    }
+  ]
+}

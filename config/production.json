@@ -1,0 +1,214 @@
+{
+  "listen": "0.0.0.0:3000",
+  "live_enabled": true,
+  "kiwirecorder_path": "vendor/kiwiclient/kiwirecorder.py",
+  "python": "python3",
+  "gps_utc_offset_s": 18,
+  "gps_offset_evidence": {
+    "url": "https://hpiers.obspm.fr/iers/bul/bulc/bulletinc.dat",
+    "note": "IERS Bulletin C72, 6 July 2026: TAI−UTC=37 s; GPS=TAI−19 s, hence GPS−UTC=18 s. No leap second December 2026. Retrieved 2026-11-26. Revalidate before July 2027."
+  },
+  "sources": [
+    {
+      "id": "f82e0c018380",
+      "label": "15 kHz-30 MHz KiwiSDR2 - F1JEK/P - France - DX-500 active antenna.",
+      "independent_device": "f82e0c018380",
+      "base_url": "http://f1jeksdr1.ddns.net:8073/",
+      "position": {
+        "lat": 45.79,
+        "lon": 0.65
+      },
+      "position_evidence": {
+        "url": "http://f1jeksdr1.ddns.net:8073/status",
+        "note": "Operator-reported receiver location associated with antenna: DX-500 active. Matched /status and directory 2026-11-26T20:01:12.401327+00:00. Not an independent antenna survey; 1 km conservative assumed location allowance, not measured accuracy."
+      },
+      "position_uncertainty_m": 1000,
+      "antenna_position_verified": true,
+      "bands_hz": [
+        [
+          15000,
+          30000000
+        ]
+      ],
+      "bands_evidence": {
+        "url": "http://f1jeksdr1.ddns.net:8073/status",
+        "note": "Published available range 15000-30000000 Hz, freq_offset=0; checked 2026-11-26T20:01:12.401327+00:00."
+      },
+      "permission": {
+        "automatic_capture": true,
+        "evidence": {
+          "url": "http://f1jeksdr1.ddns.net:8073/status",
+          "note": "Public /status verified 2026-11-26T20:01:12.401327+00:00: ext_api=1, tdoa_ch=3. Operator publishes API channel allowance; bounded 30 s capture, one channel. Rechecked immediately before every acquisition. The published API policy is rechecked for every capture; expires_utc is not used for this basis. The 30 s cap is our own conservative limit."
+        },
+        "expires_utc": "2026-11-27T02:03:35.719273+00:00",
+        "max_capture_s": 30,
+        "basis": "published_api"
+      }
+    },
+    {
+      "id": "00aafd2d3947",
+      "label": "0-30 MHz SDR | OZ5OD Hoell Strand. Denmak",
+      "independent_device": "00aafd2d3947",
+      "base_url": "http://22902.proxy.kiwisdr.com:8073/",
+      "position": {
+        "lat": 55.636708,
+        "lon": 9.737335
+      },
+      "position_evidence": {
+        "url": "http://22902.proxy.kiwisdr.com:8073/status",
+        "note": "Operator-reported receiver location associated with antenna: Mini-Whip / 45,1m invertet L. Matched /status and directory 2026-11-26T20:01:11.835660+00:00. Not an independent antenna survey; 1 km conservative assumed location allowance, not measured accuracy."
+      },
+      "position_uncertainty_m": 1000,
+      "antenna_position_verified": true,
+      "bands_hz": [
+        [
+          0,
+          30000000
+        ]
+      ],
+      "bands_evidence": {
+        "url": "http://22902.proxy.kiwisdr.com:8073/status",
+        "note": "Published available range 0-30000000 Hz, freq_offset=0; checked 2026-11-26T20:01:11.835660+00:00."
+      },
+      "permission": {
+        "automatic_capture": true,
+        "evidence": {
+          "url": "http://22902.proxy.kiwisdr.com:8073/status",
+          "note": "Public /status verified 2026-11-26T20:01:11.835660+00:00: ext_api=4, tdoa_ch=4. Operator publishes API channel allowance; bounded 30 s capture, one channel. Rechecked immediately before every acquisition. The published API policy is rechecked for every capture; expires_utc is not used for this basis. The 30 s cap is our own conservative limit."
+        },
+        "expires_utc": "2026-11-27T02:03:35.719438+00:00",
+        "max_capture_s": 30,
+        "basis": "published_api"
+      }
+    },
+    {
+      "id": "147f0fdf7a94",
+      "label": "Hofmann's SDR 2 | Thamsbrück, Germany",
+      "independent_device": "147f0fdf7a94",
+      "base_url": "http://21918.proxy2.kiwisdr.com:8073/",
+      "position": {
+        "lat": 51.140043,
+        "lon": 10.638391
+      },
+      "position_evidence": {
+        "url": "http://21918.proxy2.kiwisdr.com:8073/status",
+        "note": "Operator-reported receiver location associated with antenna: Long Wire Antenna. Matched /status and directory 2026-11-26T20:01:14.661523+00:00. Not an independent antenna survey; 1 km conservative assumed location allowance, not measured accuracy."
+      },
+      "position_uncertainty_m": 1000,
+      "antenna_position_verified": true,
+      "bands_hz": [
+        [
+          0,
+          30000000
+        ]
+      ],
+      "bands_evidence": {
+        "url": "http://21918.proxy2.kiwisdr.com:8073/status",
+        "note": "Published available range 0-30000000 Hz, freq_offset=0; checked 2026-11-26T20:01:14.661523+00:00."
+      },
+      "permission": {
+        "automatic_capture": true,
+        "evidence": {
+          "url": "http://21918.proxy2.kiwisdr.com:8073/status",
+          "note": "Public /status verified 2026-11-26T20:01:14.661523+00:00: ext_api=4, tdoa_ch=4. Operator publishes API channel allowance; bounded 30 s capture, one channel. Rechecked immediately before every acquisition. The published API policy is rechecked for every capture; expires_utc is not used for this basis. The 30 s cap is our own conservative limit."
+        },
+        "expires_utc": "2026-11-27T02:03:35.719580+00:00",
+        "max_capture_s": 30,
+        "basis": "published_api"
+      }
+    },
+    {
+      "id": "f82e0c136d0e",
+      "label": "DF2SI 0-30 MHz SDR | Fürstenfeldbruck, Germany",
+      "independent_device": "f82e0c136d0e",
+      "base_url": "http://21897.proxy2.kiwisdr.com:8073/",
+      "position": {
+        "lat": 48.173209,
+        "lon": 11.235934
+      },
+      "position_evidence": {
+        "url": "http://21897.proxy2.kiwisdr.com:8073/status",
+        "note": "Operator-reported receiver location associated with antenna: 10m multiband vertical. Matched /status and directory 2026-11-26T20:01:12.670390+00:00. Not an independent antenna survey; 1 km conservative assumed location allowance, not measured accuracy."
+      },
+      "position_uncertainty_m": 1000,
+      "antenna_position_verified": true,
+      "bands_hz": [
+        [
+          0,
+          30000000
+        ]
+      ],
+      "bands_evidence": {
+        "url": "http://21897.proxy2.kiwisdr.com:8073/status",
+        "note": "Published available range 0-30000000 Hz, freq_offset=0; checked 2026-11-26T20:01:12.670390+00:00."
+      },
+      "permission": {
+        "automatic_capture": true,
+        "evidence": {
+          "url": "http://21897.proxy2.kiwisdr.com:8073/status",
+          "note": "Public /status verified 2026-11-26T20:01:12.670390+00:00: ext_api=4, tdoa_ch=4. Operator publishes API channel allowance; bounded 30 s capture, one channel. Rechecked immediately before every acquisition. The published API policy is rechecked for every capture; expires_utc is not used for this basis. The 30 s cap is our own conservative limit."
+        },
+        "expires_utc": "2026-11-27T02:03:35.719654+00:00",
+        "max_capture_s": 30,
+        "basis": "published_api"
+      }
+    },
+    {
+      "id": "0cb2b7d6cd86",
+      "label": "0-32 MHz KiwiSDR, PE1NOD. | High Tech Campus Eindhoven, The Netherlands.",
+      "independent_device": "0cb2b7d6cd86",
+      "base_url": "http://82.139.82.247:8073/",
+      "position": {
+        "lat": 51.413155,
+        "lon": 5.459469
+      },
+      "position_evidence": {
+        "url": "http://82.139.82.247:8073/status",
+        "note": "Operator-reported receiver location associated with antenna: Active Rod Antenna. Matched /status and directory 2026-11-26T20:01:11.831882+00:00. Not an independent antenna survey; 1 km conservative assumed location allowance, not measured accuracy."
+      },
+      "position_uncertainty_m": 1000,
+      "antenna_position_verified": true,
+      "bands_hz": [
+        [
+          0,
+          32000000
+        ]
+      ],
+      "bands_evidence": {
+        "url": "http://82.139.82.247:8073/status",
+        "note": "Published available range 0-32000000 Hz, freq_offset=0; checked 2026-11-26T20:01:11.831882+00:00."
+      },
+      "permission": {
+        "automatic_capture": true,
+        "evidence": {
+          "url": "http://82.139.82.247:8073/status",
+          "note": "Public /status verified 2026-11-26T20:01:11.831882+00:00: ext_api=4, tdoa_ch=4. Operator publishes API channel allowance; bounded 30 s capture, one channel. Rechecked immediately before every acquisition. The published API policy is rechecked for every capture; expires_utc is not used for this basis. The 30 s cap is our own conservative limit."
+        },
+        "expires_utc": "2026-11-27T02:03:35.719781+00:00",
+        "max_capture_s": 30,
+        "basis": "published_api"
+      }
+    }
+  ],
+  "targets": [
+    {
+      "id": "dcf77-validation",
+      "kind": "public_time_reference",
+      "frequency_hz": 77500,
+      "eligibility_evidence": {
+        "url": "https://www.ptb.de/cms/en/ptb/fachabteilungen/abt4/fb-44/ag-442/dissemination-of-legal-time/dcf77.html",
+        "note": "Public DCF77 time reference commissioning channel. Eligibility of actual RF must be established from its PRN modulation; frequency alone does not identify a transmission. No transmitter location is supplied to the solver."
+      },
+      "source_ids": [
+        "f82e0c018380",
+        "00aafd2d3947",
+        "147f0fdf7a94",
+        "f82e0c136d0e",
+        "0cb2b7d6cd86"
+      ],
+      "duration_s": 30,
+      "verification": "dcf77_prn_v1"
+    }
+  ],
+  "gps_offset_valid_until_utc": "2027-01-01T00:00:00Z"
+}

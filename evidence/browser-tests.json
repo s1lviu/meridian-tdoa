@@ -1,0 +1,21 @@
+{
+  "passed": true,
+  "checks": [
+    "real recording: ambiguous hypotheses, no unique transmitter marker, three receptions",
+    "zoom queries viewport; region intersects even when centroid/receivers outside; selected receiver list preserved",
+    "pan filters emissions while detail retains all confirmed receivers outside viewport",
+    "band filter returns unmonitored, not no-emission",
+    "invalid UTC interval rejected",
+    "post-hoc real-data error shown without choosing the known transmitter hypothesis",
+    "loss-of-sync result from actual IQ opens correctly, with no position or candidate area",
+    "live and replay separated; capture requires administrator token",
+    "unauthenticated capture and forced DSP refused before starting work",
+    "real public catalog searchable, policy exclusions retained, metadata never presented as RF reception",
+    "readiness and browser security headers present",
+    "390px responsive layout and modal interaction; no horizontal overflow",
+    "no browser JavaScript exceptions"
+  ],
+  "console_errors": [],
+  "browser": "156.0.8078.79",
+  "utc": "2026-11-27T08:12:32.875Z"
+}

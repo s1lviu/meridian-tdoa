@@ -1,0 +1,70 @@
+{
+  "checked_at": "2026-11-26T20:01:12.401327+00:00",
+  "source": {
+    "updated": "Thursday, 26-Nov-2026 18:26:35 GMT",
+    "id": "f82e0c018380",
+    "status": "active",
+    "offline": false,
+    "name": "15 kHz-30 MHz KiwiSDR2 - F1JEK/P - France - DX-500 active antenna.",
+    "sdr_hw": "KiwiSDR 2 v1.902 ⁣ 📡 GPS ⁣ ⏳ Limits ⁣⁣ 🌀D11.9",
+    "bands": [
+      15000,
+      30000000
+    ],
+    "freq_offset": 0,
+    "mode": "rx4.wf4",
+    "users": 1,
+    "users_max": 4,
+    "ext_api": 1,
+    "preempt": 0,
+    "avatar_ctime": 1784781508,
+    "gps": [
+      45.79,
+      0.65
+    ],
+    "grid": "JN05hs",
+    "gps_good": 8,
+    "fixes": 23925,
+    "fixes_min": 30,
+    "fixes_hour": 1786,
+    "tdoa_id": "F1JEK/P",
+    "tdoa_ch": 3,
+    "asl": 200,
+    "loc": "Massignac, France",
+    "sw_version": "KiwiSDR_v1.902",
+    "antenna": "DX-500 active",
+    "snr": [
+      29,
+      21
+    ],
+    "ant_connected": true,
+    "sm_cal": -13,
+    "wf_cal": -13,
+    "adc_ov": 15,
+    "clk_ext_freq": 66665900,
+    "clk_ext_gps": [
+      0,
+      1
+    ],
+    "uptime": 48764,
+    "gps_date": [
+      1,
+      1
+    ],
+    "date": "Thu Nov 26 18:26:35 2026",
+    "ip_blacklist": "2dbe9dff",
+    "dx_file": "935,42fc633a,45867",
+    "debian": "D11.9",
+    "url": "http://f1jeksdr1.ddns.net:8073",
+    "seq": 612,
+    "snr_all": 29,
+    "snr_hf": 21,
+    "flagged": false
+  },
+  "url": "http://f1jeksdr1.ddns.net:8073/status",
+  "body": "status=active\noffline=no\nname=15 kHz-30 MHz KiwiSDR2 - F1JEK/P - France - DX-500 active antenna.\nsdr_hw=KiwiSDR 2 v1.902 ⁣ 📡 GPS ⁣ ⏳ Limits ⁣\nop_email=[redacted: contact not required for RF validation]\nbands=15000-30000000\nfreq_offset=0.000\nmode=rx4.wf4\nusers=1\nusers_max=4\next_api=1\npreempt=0\navatar_ctime=1784781508\ngps=(45.790000, 0.650000)\ngrid=JN05hs\ngps_good=8\nfixes=26732\nfixes_min=29\nfixes_hour=1779\ntdoa_id=F1JEK/P\ntdoa_ch=3\nasl=200\nloc=Massignac, France\nsw_version=KiwiSDR_v1.902\nantenna=DX-500 active\nsnr=31,24\nant_connected=1\nsm_cal=-13\nwf_cal=-13\nadc_ov=16\nclk_ext_freq=66665900\nclk_ext_gps=0,1\nuptime=54441\ngps_date=1,1\ndate=Thu Nov 26 20:01:12 2026\nip_blacklist=2dbe9dff\ndx_file=935,42fc633a,45867\n",
+  "error": null,
+  "redactions": [
+    "operator contact email (op_email); measurement fields unchanged"
+  ]
+}

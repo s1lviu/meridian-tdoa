@@ -1,0 +1,33 @@
+{
+  "passed": true,
+  "utc": "2026-11-26T21:15:07.091Z",
+  "checks": [
+    "readiness, malformed bbox rejection, capture/catalog mutations require token",
+    "release binary processed actual IQ without transmitter coordinates, retaining both hypotheses",
+    "release binary processed actual IQ with GNSS loss, no position/candidate region",
+    "real catalog is paginated and separate from RF reception; no fabricated live emissions"
+  ],
+  "jobs": [
+    {
+      "emission_id": "dcf77-20200813",
+      "id": "45e7c785-91b1-4cfa-88e2-d786986dfe53",
+      "started_at": "2026-11-26T21:15:06.453838647+00:00",
+      "status": "completed",
+      "updated_at": "2026-11-26T21:15:06.775196261+00:00"
+    },
+    {
+      "emission_id": "dcf77-20200813-sync-loss",
+      "id": "91cb8ab5-120e-42db-80ce-07f5d3fa245d",
+      "started_at": "2026-11-26T21:15:06.874764605+00:00",
+      "status": "completed",
+      "updated_at": "2026-11-26T21:15:07.009732795+00:00"
+    }
+  ],
+  "live_rf_validated": false,
+  "catalog": {
+    "total": 828,
+    "api_allowed": 677,
+    "candidates": 256,
+    "fetched_at": "2026-11-26T20:00:13.000Z"
+  }
+}

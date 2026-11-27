@@ -1,0 +1,70 @@
+{
+  "checked_at": "2026-11-26T20:01:14.661523+00:00",
+  "source": {
+    "updated": "Thursday, 26-Nov-2026 18:21:08 GMT",
+    "id": "147f0fdf7a94",
+    "status": "active",
+    "offline": false,
+    "name": "Hofmann's SDR 2 | Thamsbrück, Germany",
+    "sdr_hw": "KiwiSDR 2 v1.902 ⁣ 📡 GPS ⁣ 📻 DRM ⁣⁣ 🌀D11.9",
+    "bands": [
+      0,
+      30000000
+    ],
+    "freq_offset": 0,
+    "mode": "rx8.wf3",
+    "users": 0,
+    "users_max": 2,
+    "ext_api": 4,
+    "preempt": 0,
+    "avatar_ctime": 1784762752,
+    "gps": [
+      51.140043,
+      10.638391
+    ],
+    "grid": "JO51hd",
+    "gps_good": 8,
+    "fixes": 31513,
+    "fixes_min": 29,
+    "fixes_hour": 1754,
+    "tdoa_id": "",
+    "tdoa_ch": 4,
+    "asl": 200,
+    "loc": "Thamsbrück, Germany",
+    "sw_version": "KiwiSDR_v1.902",
+    "antenna": "Long Wire Antenna",
+    "snr": [
+      21,
+      20
+    ],
+    "ant_connected": true,
+    "sm_cal": -16,
+    "wf_cal": -11,
+    "adc_ov": 118,
+    "clk_ext_freq": 66665900,
+    "clk_ext_gps": [
+      0,
+      1
+    ],
+    "uptime": 64966,
+    "gps_date": [
+      0,
+      0
+    ],
+    "date": "Thu Nov 26 18:21:09 2026",
+    "ip_blacklist": "2dbe9dff",
+    "dx_file": "872,db6868b3,52120",
+    "debian": "D11.9",
+    "url": "http://21918.proxy.kiwisdr.com",
+    "seq": 708,
+    "snr_all": 21,
+    "snr_hf": 20,
+    "flagged": false
+  },
+  "url": "http://21918.proxy.kiwisdr.com/status",
+  "body": "status=active\noffline=no\nname=Hofmann's SDR 2 | Thamsbrück, Germany\nsdr_hw=KiwiSDR 2 v1.902 ⁣ 📡 GPS ⁣ 📻 DRM ⁣\nop_email=[redacted: contact not required for RF validation]\nbands=0-30000000\nfreq_offset=0.000\nmode=rx8.wf3\nusers=0\nusers_max=2\next_api=4\npreempt=0\navatar_ctime=1784762752\ngps=(51.140043, 10.638391)\ngrid=JO51hd\ngps_good=8\nfixes=34420\nfixes_min=29\nfixes_hour=1743\ntdoa_id=\ntdoa_ch=4\nasl=200\nloc=Thamsbrück, Germany\nsw_version=KiwiSDR_v1.902\nantenna=Long Wire Antenna\nsnr=21,21\nant_connected=1\nsm_cal=-16\nwf_cal=-11\nadc_ov=118\nclk_ext_freq=66665900\nclk_ext_gps=0,1\nuptime=70971\ngps_date=0,0\ndate=Thu Nov 26 20:01:14 2026\nip_blacklist=2dbe9dff\ndx_file=872,db6868b3,52120\n",
+  "error": null,
+  "redactions": [
+    "operator contact email (op_email); measurement fields unchanged"
+  ]
+}

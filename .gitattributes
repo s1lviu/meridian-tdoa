@@ -1,0 +1,10 @@
+* text=auto
+*.sh text eol=lf
+*.wav binary
+*.png binary
+*.jpg binary
+*.tar.gz binary
+web/vendor/** -text -whitespace linguist-vendored
+web/world.geojson linguist-generated
+data/results/** linguist-generated
+evidence/** linguist-generated

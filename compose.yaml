@@ -1,0 +1,44 @@
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: 1g
+    stop_grace_period: 190s
+    env_file: .secrets/runtime.env
+    environment:
+      PORT: "3000"
+      MERIDIAN_CONFIG: /app/config/production.json
+    volumes:
+      - meridian-data:/app/data
+      - ./config/production.json:/app/config/production.json:ro
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+    ports:
+      - "127.0.0.1:3000:3000"
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+  web:
+    image: caddy:2.10.2-alpine
+    restart: unless-stopped
+    environment:
+      MERIDIAN_DOMAIN: ${MERIDIAN_DOMAIN:?Set the domain in .env}
+    ports: ["80:80", "443:443", "443:443/udp"]
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      app: {condition: service_healthy}
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+volumes:
+  meridian-data:
+  caddy-data:
+  caddy-config:

@@ -1,0 +1,57 @@
+{
+  "dataset": "dcf77-20200813",
+  "unique": false,
+  "reference": {
+    "lat": 50.0175,
+    "lon": 9.009444444444444
+  },
+  "reference_source": "https://www.ptb.de/cms/fileadmin/internet/publikationen/masstaebe/Hefte_Komplett_PDF/mst01.pdf",
+  "hypotheses": [
+    {
+      "center": {
+        "lat": 50.012338638305664,
+        "lon": 9.033147811889648
+      },
+      "error_km": 1.788265514179551,
+      "model_radius_km": 39.08123801750382
+    },
+    {
+      "center": {
+        "lat": -49.15639114379883,
+        "lon": -173.69237327575684
+      },
+      "error_km": 19798.10216053989,
+      "model_radius_km": 56.57787947428065
+    }
+  ],
+  "sync_loss_result": "Position undetermined; 2/3 synchronized receivers, no region or coordinates published.",
+  "limitations": "Three receivers, two global solutions. DCF77 is a time reference, not an amateur beacon. Antenna offsets and delays have no published calibration. Historical IQ does not establish current source availability or synchronization. Live checks are documented in docs/LIVE-SOURCES.md. No unique localization or guaranteed accuracy is claimed.",
+  "start_utc": "2020-08-13T06:52:21.801Z",
+  "end_utc": "2020-08-13T06:52:50.168Z",
+  "pairs": [
+    {
+      "a": "HB9ODP",
+      "b": "JO51xl",
+      "delay_us": -427.87531018463596,
+      "sigma_us": 83.33333333333333,
+      "coherence": 0.9739314497019746,
+      "windows": 14
+    },
+    {
+      "a": "HB9ODP",
+      "b": "pa0rdt",
+      "delay_us": 84.34507684376665,
+      "sigma_us": 83.33333333333333,
+      "coherence": 0.9790306066020906,
+      "windows": 14
+    },
+    {
+      "a": "JO51xl",
+      "b": "pa0rdt",
+      "delay_us": 513.3213255815482,
+      "sigma_us": 83.33333333333333,
+      "coherence": 0.983195379257395,
+      "windows": 14
+    }
+  ]
+}

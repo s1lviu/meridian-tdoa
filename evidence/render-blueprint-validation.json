@@ -1,0 +1,12 @@
+{
+  "checked_at": "2026-11-27T07:55:14.309629+00:00",
+  "schema_url": "https://render.com/schema/render.yaml.json",
+  "schema_sha256": "13248a0ed6e60d3ba2f770a62b2b3075deffcdb141502d7324b3566c9260444f",
+  "config_sha256": "7d7fadcb1751516dd57a971204cb7e9aef6c53a171fc16de882e7724f95cf71c",
+  "schema_valid": true,
+  "plan": "free",
+  "paid_resources_created": false,
+  "render_deployed": false,
+  "live_rf_validated_on_render": false,
+  "validation_scope": "Local JSON Schema validation against the official published schema. No Render account/API deployment validation."
+}

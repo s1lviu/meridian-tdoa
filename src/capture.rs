@@ -1,0 +1,522 @@
+//! Live acquisition delegates only the documented wire protocol to pinned KiwiClient.
+use crate::{
+    geo,
+    model::*,
+    pipeline::{checksum, valid_evidence, valid_position},
+};
+use anyhow::{Context, Result, ensure};
+use chrono::{DateTime, Utc};
+use serde_json::{Value, json};
+use std::{
+    collections::{HashMap, HashSet},
+    path::{Path, PathBuf},
+    time::Duration,
+};
+use tokio::process::Command;
+
+fn safe_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() < 64
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+pub fn authorize(config: &Config, target: &Target) -> Result<Vec<LiveSource>> {
+    ensure!(
+        config.live_enabled,
+        "Live capture is disabled in the configuration"
+    );
+    ensure!(
+        [
+            "public_beacon",
+            "participating_amateur",
+            "public_time_reference"
+        ]
+        .contains(&target.kind.as_str())
+            && valid_evidence(&target.eligibility_evidence),
+        "Target eligibility is not documented"
+    );
+    ensure!(
+        safe_id(&target.id)
+            && (10..=120).contains(&target.duration_s)
+            && (3..=8).contains(&target.source_ids.len()),
+        "Invalid target configuration"
+    );
+    ensure!(
+        target.frequency_hz.is_finite() && (6000.0..=30e6).contains(&target.frequency_hz),
+        "Invalid frequency"
+    );
+    ensure!(
+        valid_evidence(&config.gps_offset_evidence),
+        "Verify the current GPS–UTC offset"
+    );
+    let valid_until = DateTime::parse_from_rfc3339(
+        config
+            .gps_offset_valid_until_utc
+            .as_deref()
+            .context("Missing GPS–UTC revalidation deadline")?,
+    )?;
+    ensure!(
+        valid_until.with_timezone(&Utc)
+            > Utc::now() + chrono::Duration::seconds(target.duration_s as i64 + 120),
+        "Revalidate the IERS bulletin and GPS–UTC deadline before capture"
+    );
+    let mut sources = vec![];
+    let mut devices = HashSet::new();
+    for id in &target.source_ids {
+        let s = config
+            .sources
+            .iter()
+            .find(|s| &s.id == id)
+            .context("Receiver is not configured")?;
+        ensure!(
+            safe_id(&s.id)
+                && devices.insert(s.independent_device.clone())
+                && !s.independent_device.is_empty(),
+            "Receivers are not independent"
+        );
+        ensure!(
+            s.permission.automatic_capture
+                && valid_evidence(&s.permission.evidence)
+                && (s.permission.basis == "published_api"
+                    || DateTime::parse_from_rfc3339(&s.permission.expires_utc)?
+                        .with_timezone(&Utc)
+                        > Utc::now())
+                && target.duration_s <= s.permission.max_capture_s,
+            "Automatic access is missing, expired or exceeds the duration limit: {}",
+            s.id
+        );
+        ensure!(
+            s.antenna_position_verified
+                && valid_position(s.position)
+                && valid_evidence(&s.position_evidence)
+                && s.position_uncertainty_m.is_finite()
+                && (0.0..=1000.0).contains(&s.position_uncertainty_m),
+            "Antenna position is unverified: {}",
+            s.id
+        );
+        ensure!(
+            valid_evidence(&s.bands_evidence)
+                && s.bands_hz
+                    .iter()
+                    .any(|b| b[0] <= target.frequency_hz - 5000.
+                        && b[1] >= target.frequency_hz + 5000.),
+            "The IQ channel falls outside approved bands: {}",
+            s.id
+        );
+        let url = reqwest::Url::parse(&s.base_url)?;
+        ensure!(
+            url.scheme() == "http"
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.path() == "/"
+                && url.query().is_none()
+                && url.fragment().is_none(),
+            "This adapter only supports a configured HTTP KiwiSDR endpoint; other protocols are rejected"
+        );
+        sources.push(s.clone());
+    }
+    ensure!(
+        geo::geometry(&sources.iter().map(|s| s.position).collect::<Vec<_>>()) > 0.02,
+        "Collinear receivers"
+    );
+    Ok(sources)
+}
+
+pub fn check_status(text: &str, source: &LiveSource, freq: f64) -> Result<Value> {
+    let fields: HashMap<_, _> = text
+        .lines()
+        .filter_map(|s| s.trim().split_once('='))
+        .filter(|(key, _)| *key != "op_email")
+        .collect();
+    ensure!(
+        fields.get("status") == Some(&"active")
+            && fields.get("offline") == Some(&"no")
+            && !fields.contains_key("auth"),
+        "Receiver unavailable or authentication required"
+    );
+    let bands = fields.get("bands").context("Missing bands in /status")?;
+    let (lo, hi) = bands.split_once('-').context("Unknown bands format")?;
+    ensure!(
+        lo.parse::<f64>()? <= freq - 5000. && hi.parse::<f64>()? >= freq + 5000.,
+        "Band unavailable"
+    );
+    ensure!(
+        fields
+            .get("freq_offset")
+            .context("Unknown frequency offset")?
+            .parse::<f64>()?
+            == 0.,
+        "Frequency-converted receivers require calibration and are not accepted by this adapter"
+    );
+    let gps = fields
+        .get("gps")
+        .context("Missing coordinates")?
+        .trim_matches(|c| c == '(' || c == ')');
+    let (lat, lon) = gps.split_once(',').context("Invalid GPS coordinates")?;
+    let p = Point {
+        lat: lat.trim().parse()?,
+        lon: lon.trim().parse()?,
+    };
+    ensure!(
+        valid_position(p)
+            && geo::distance(p, source.position) * 1000. <= source.position_uncertainty_m.max(100.),
+        "Reported position differs from the checked antenna metadata"
+    );
+    let integer = |key: &str| -> Result<u32> {
+        Ok(fields
+            .get(key)
+            .with_context(|| format!("Missing {key}"))?
+            .parse()?)
+    };
+    ensure!(
+        integer("gps_good")? >= 4 && integer("fixes_min")? > 0,
+        "GNSS unavailable during preflight"
+    );
+    ensure!(
+        integer("users")? < integer("users_max")?,
+        "No channels available"
+    );
+    ensure!(
+        integer("ext_api")? > 0,
+        "The operator does not permit external API access"
+    );
+    ensure!(
+        integer("tdoa_ch")? > 0,
+        "The operator does not provide GPS-timestamped TDoA channels"
+    );
+    ensure!(
+        fields.get("ant_connected") == Some(&"1"),
+        "Antenna disconnected"
+    );
+    ensure!(
+        fields.get("antenna").is_some_and(|v| !v.trim().is_empty()),
+        "Antenna undocumented"
+    );
+    Ok(
+        json!({"checked_at":Utc::now().to_rfc3339(),"fields":fields,"note":"Preflight only; synchronization must also pass in each captured block."}),
+    )
+}
+
+/// Follow only the receiver's own canonical origin or the documented Kiwi proxy cluster.
+/// Every final endpoint is checked again; redirects to another receiver are refused.
+async fn probe(
+    client: &reqwest::Client,
+    source: &LiveSource,
+    freq: f64,
+) -> Result<(LiveSource, Value)> {
+    let original = reqwest::Url::parse(&source.base_url)?;
+    let mut url = original.join("status")?;
+    for _ in 0..4 {
+        let mut response = client.get(url.clone()).send().await?.error_for_status()?;
+        if response.status().is_redirection() {
+            let next = url.join(
+                response
+                    .headers()
+                    .get("location")
+                    .context("Redirect has no Location")?
+                    .to_str()?,
+            )?;
+            let a = original.host_str().unwrap_or("");
+            let b = next.host_str().unwrap_or("");
+            let kiwi_proxy = |h: &str| {
+                [
+                    ".proxy.kiwisdr.com",
+                    ".proxy2.kiwisdr.com",
+                    ".proxy3.kiwisdr.com",
+                ]
+                .iter()
+                .any(|suffix| h.ends_with(suffix))
+            };
+            ensure!(
+                next.scheme() == "http"
+                    && next.path() == "/status"
+                    && next.query().is_none()
+                    && next.username().is_empty()
+                    && next.password().is_none()
+                    && (a == b
+                        || (kiwi_proxy(a)
+                            && kiwi_proxy(b)
+                            && a.split('.').next() == b.split('.').next())),
+                "Redirect outside the checked receiver"
+            );
+            url = next;
+            continue;
+        }
+        ensure!(response.status().is_success(), "Invalid status response");
+        let mut bytes = vec![];
+        while let Some(chunk) = response.chunk().await? {
+            ensure!(
+                bytes.len() + chunk.len() <= 65536,
+                "/status response too large"
+            );
+            bytes.extend_from_slice(&chunk);
+        }
+        let observation = check_status(std::str::from_utf8(&bytes)?, source, freq)?;
+        let mut canonical = source.clone();
+        canonical.base_url = url.join("/")?.to_string();
+        return Ok((canonical, observation));
+    }
+    anyhow::bail!("Too many /status redirects")
+}
+
+pub async fn capture(config: &Config, target: &Target, data_dir: &Path) -> Result<PathBuf> {
+    let sources = authorize(config, target)?;
+    fn bytes_in(path: &Path) -> Result<u64> {
+        if !path.exists() {
+            return Ok(0);
+        }
+        let mut size = 0u64;
+        for entry in std::fs::read_dir(path)? {
+            let entry = entry?;
+            let m = entry.metadata()?;
+            if m.is_file() {
+                size = size.saturating_add(m.len());
+            } else if m.is_dir() {
+                size = size.saturating_add(bytes_in(&entry.path())?);
+            }
+        }
+        Ok(size)
+    }
+    let quota = std::env::var("MERIDIAN_CAPTURE_QUOTA_BYTES")
+        .ok()
+        .map(|s| s.parse::<u64>())
+        .transpose()?
+        .unwrap_or(2 * 1024 * 1024 * 1024);
+    ensure!(
+        bytes_in(data_dir)?.saturating_add(sources.len() as u64 * 64 * 1024 * 1024) <= quota,
+        "IQ archive quota almost exhausted; export/archive captures before continuing"
+    );
+    let cooldown = data_dir.join("last-attempt.json");
+    if let Ok(v) = std::fs::read(&cooldown)
+        .and_then(|b| serde_json::from_slice::<Value>(&b).map_err(std::io::Error::other))
+    {
+        if let Some(at) = v["utc"]
+            .as_str()
+            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+        {
+            ensure!(
+                Utc::now().signed_duration_since(at).num_seconds() >= 60,
+                "At least 60 s between capture attempts; no automatic retries"
+            );
+        }
+    }
+    crate::store::atomic_json(&cooldown, &json!({"utc":Utc::now().to_rfc3339()}))?;
+    let id = format!("live-{}", uuid::Uuid::new_v4());
+    let dir = data_dir.join(&id);
+    tokio::fs::create_dir_all(dir.join("gnss_pos")).await?;
+    let dir = dir.canonicalize()?;
+    let client = reqwest::Client::builder()
+        .user_agent("Meridian-TDoA/0.2 source-verification")
+        .timeout(Duration::from_secs(8))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+    let mut checks = vec![];
+    let mut available = vec![];
+    for s in &sources {
+        match probe(&client, s, target.frequency_hz).await {
+            Ok((canonical, observation)) => {
+                checks.push(json!({"source":canonical,"observation":observation}));
+                available.push(canonical);
+            }
+            Err(e) => checks.push(json!({"source":s,"error":e.to_string()})),
+        }
+    }
+    crate::store::atomic_json(&dir.join("source-checks.json"), &checks)?;
+    ensure!(
+        available.len() >= 3,
+        "{}: only {} receivers pass current checks; unmonitored interval. See source-checks.json",
+        id,
+        available.len()
+    );
+    ensure!(
+        geo::geometry(&available.iter().map(|s| s.position).collect::<Vec<_>>()) > 0.02,
+        "Insufficient geometry after current checks"
+    );
+    let recorder = Path::new(&config.kiwirecorder_path)
+        .canonicalize()
+        .context("Install KiwiClient with scripts/setup_kiwiclient.sh")?;
+    let transport = Path::new("scripts/kiwi_transport.py").canonicalize()?;
+    let python = if config.python.contains('/') {
+        Path::new(&config.python).canonicalize()?
+    } else {
+        PathBuf::from(&config.python)
+    };
+    let capture_time = Utc::now();
+    let mut tasks = tokio::task::JoinSet::new();
+    // Independent child per physical receiver: one busy/disconnected receiver cannot stop the other captures.
+    for source in available {
+        let python = python.clone();
+        let recorder = recorder.clone();
+        let transport = transport.clone();
+        let dir = dir.clone();
+        let target = target.clone();
+        tasks.spawn(async move {
+            let result: Result<()> = async {
+                let url = reqwest::Url::parse(&source.base_url)?;
+                let mut cmd = Command::new(python);
+                cmd.arg(transport)
+                    .arg(recorder)
+                    .args([
+                        "-s",
+                        url.host_str().context("Missing host")?,
+                        "-p",
+                        &url.port_or_known_default()
+                            .context("Missing port")?
+                            .to_string(),
+                        "--station",
+                        &source.id,
+                        "--filename",
+                        "capture",
+                        "-f",
+                        &(target.frequency_hz / 1000.).to_string(),
+                        "-m",
+                        "iq",
+                        "--kiwi-wav",
+                        "-L",
+                        "-5000",
+                        "-H",
+                        "5000",
+                        "--tlimit",
+                        &target.duration_s.to_string(),
+                        "--connect-timeout",
+                        "8",
+                        "--connect-retries",
+                        "1",
+                        "--busy-retries",
+                        "1",
+                        "--socket-timeout",
+                        "8",
+                        "--user",
+                        "Meridian-TDoA public beacon measurement",
+                        "--quiet",
+                    ])
+                    .arg("--dir")
+                    .arg(&dir)
+                    .current_dir(&dir)
+                    .env("OPENBLAS_NUM_THREADS", "1")
+                    .kill_on_drop(true);
+                let log = std::fs::File::create(dir.join(format!("{}.log", source.id)))?;
+                cmd.stdout(log.try_clone()?).stderr(log);
+                let status =
+                    tokio::time::timeout(Duration::from_secs(target.duration_s + 20), cmd.status())
+                        .await
+                        .context("Timeout IQ")??;
+                ensure!(status.success(), "KiwiClient terminat cu eroare");
+                Ok(())
+            }
+            .await;
+            (source, result)
+        });
+    }
+    let mut receivers = vec![];
+    let mut outcomes = vec![];
+    while let Some(result) = tasks.join_next().await {
+        let (s, status) = result?;
+        let file = dir.join(format!("capture_{}.wav", s.id));
+        if status.is_err() || !file.is_file() || std::fs::metadata(&file)?.len() < 44 {
+            outcomes.push(json!({"receiver":s.id,"captured":false,"error":status.err().map(|e|e.to_string()).unwrap_or("No IQ received".into())}));
+            continue;
+        }
+        ensure!(
+            std::fs::metadata(&file)?.len() <= 64 * 1024 * 1024,
+            "IQ file too large"
+        );
+        outcomes.push(json!({"receiver":s.id,"captured":true}));
+        receivers.push(Receiver {
+            id: s.id,
+            label: s.label,
+            independent_device: s.independent_device,
+            position: s.position,
+            position_evidence: s.position_evidence,
+            position_uncertainty_m: s.position_uncertainty_m,
+            file: file.file_name().unwrap().to_string_lossy().into(),
+            sha256: checksum(&file)?,
+        });
+    }
+    crate::store::atomic_json(&dir.join("capture-outcomes.json"), &outcomes)?;
+    ensure!(
+        receivers.len() >= 3,
+        "{}: only {} IQ streams saved; no valid TDoA measurement. See capture-outcomes.json and receiver logs",
+        id,
+        receivers.len()
+    );
+    receivers.sort_by(|a, b| a.id.cmp(&b.id));
+    let manifest = Manifest {
+        id,
+        title: format!("Monitored emission · {}", target.id),
+        kind: target.kind.clone(),
+        mode: "live".into(),
+        frequency_hz: target.frequency_hz,
+        capture_utc: capture_time.to_rfc3339(),
+        gps_utc_offset_s: config.gps_utc_offset_s,
+        provenance: target.eligibility_evidence.clone(),
+        emission_verified: false,
+        identity: None,
+        receivers,
+    };
+    // Eligibility of a monitored channel never establishes the callsign of a particular emission.
+    let path = dir.join("manifest.json");
+    crate::store::atomic_json(&path, &manifest)?;
+    if target.verification.as_deref() == Some("dcf77_prn_v1") {
+        // Failure leaves the durable capture pending review; it never promotes a channel by frequency alone.
+        if let Err(e) = crate::protocol::verify(&path) {
+            crate::store::atomic_json(
+                &dir.join("verification-error.json"),
+                &json!({"error":e.to_string()}),
+            )?;
+        }
+    }
+    Ok(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn actual_status_is_accepted_but_api_optout_missing_policy_and_gnss_loss_are_refused() {
+        let c: Config = serde_json::from_str(include_str!("../config/live-verified.json")).unwrap();
+        let source = c.sources.iter().find(|s| s.id == "0cb2b7d6cd86").unwrap();
+        let v: Value =
+            serde_json::from_str(include_str!("../evidence/live/status-0cb2b7d6cd86.json"))
+                .unwrap();
+        let text = v["body"].as_str().unwrap();
+        assert!(check_status(text, source, 77500.).is_ok());
+        for (field, value) in [
+            ("ext_api", "0"),
+            ("tdoa_ch", "-1"),
+            ("gps_good", "0"),
+            ("ant_connected", "0"),
+            ("offline", "yes"),
+            ("gps", "(0, 0)"),
+        ] {
+            let changed = text
+                .lines()
+                .map(|line| {
+                    if line.starts_with(&format!("{field}=")) {
+                        format!("{field}={value}")
+                    } else {
+                        line.into()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                check_status(&changed, source, 77500.).is_err(),
+                "{field} must reject"
+            );
+        }
+        let missing = text
+            .lines()
+            .filter(|s| !s.starts_with("ext_api="))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(check_status(&missing, source, 77500.).is_err());
+        assert!(
+            !check_status(text, source, 77500.).unwrap()["fields"]
+                .as_object()
+                .unwrap()
+                .contains_key("op_email")
+        );
+    }
+}

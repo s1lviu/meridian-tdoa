@@ -1,0 +1,70 @@
+{
+  "checked_at": "2026-11-26T20:01:11.837963+00:00",
+  "source": {
+    "updated": "Thursday, 26-Nov-2026 18:49:41 GMT",
+    "id": "0804b4830585",
+    "status": "active",
+    "offline": false,
+    "name": "Fenu-Radio Kiwi2-SDR | Kefikon / Switzerland",
+    "sdr_hw": "KiwiSDR 2 v1.902 ⁣ 📡 GPS ⁣ ⏳ Limits ⁣ 📻 DRM ⁣⁣ 🌀D11.8",
+    "bands": [
+      0,
+      30000000
+    ],
+    "freq_offset": 0,
+    "mode": "rx8.wf3",
+    "users": 2,
+    "users_max": 8,
+    "ext_api": 2,
+    "preempt": 0,
+    "avatar_ctime": 1784773649,
+    "gps": [
+      47.54825,
+      8.830744
+    ],
+    "grid": "JN47jn",
+    "gps_good": 4,
+    "fixes": 386563,
+    "fixes_min": 30,
+    "fixes_hour": 1783,
+    "tdoa_id": "",
+    "tdoa_ch": 4,
+    "asl": 430,
+    "loc": "Kefikon / Switzerland",
+    "sw_version": "KiwiSDR_v1.902",
+    "antenna": "Activdipole Datong AD370 and others",
+    "snr": [
+      33,
+      21
+    ],
+    "ant_connected": true,
+    "sm_cal": -13,
+    "wf_cal": -13,
+    "adc_ov": 43464,
+    "clk_ext_freq": 66665900,
+    "clk_ext_gps": [
+      0,
+      1
+    ],
+    "uptime": 920707,
+    "gps_date": [
+      0,
+      0
+    ],
+    "date": "Thu Nov 26 18:49:42 2026",
+    "ip_blacklist": "2dbe9dff",
+    "dx_file": "102,63bd3f66,5081",
+    "debian": "D11.8",
+    "url": "http://fenuradio-kiwi2.ddns.net:8074",
+    "seq": 164,
+    "snr_all": 33,
+    "snr_hf": 21,
+    "flagged": false
+  },
+  "url": "http://fenuradio-kiwi2.ddns.net:8074/status",
+  "body": "status=active\noffline=no\nname=Fenu-Radio Kiwi2-SDR | Kefikon / Switzerland\nsdr_hw=KiwiSDR 2 v1.902 ⁣ 📡 GPS ⁣ ⏳ Limits ⁣ 📻 DRM ⁣\nop_email=[redacted: contact not required for RF validation]\nbands=0-30000000\nfreq_offset=0.000\nmode=rx8.wf3\nusers=1\nusers_max=8\next_api=2\npreempt=0\navatar_ctime=1784773649\ngps=(47.548250, 8.830744)\ngrid=JN47jn\ngps_good=2\nfixes=388682\nfixes_min=27\nfixes_hour=1781\ntdoa_id=\ntdoa_ch=4\nasl=430\nloc=Kefikon / Switzerland\nsw_version=KiwiSDR_v1.902\nantenna=Activdipole Datong AD370 and others\nsnr=34,24\nant_connected=1\nsm_cal=-13\nwf_cal=-13\nadc_ov=45330\nclk_ext_freq=66665900\nclk_ext_gps=0,1\nuptime=924997\ngps_date=0,0\ndate=Thu Nov 26 20:01:11 2026\nip_blacklist=2dbe9dff\ndx_file=102,63bd3f66,5081\n",
+  "error": null,
+  "redactions": [
+    "operator contact email (op_email); measurement fields unchanged"
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "listen": "0.0.0.0:3000",
+  "live_enabled": false,
+  "kiwirecorder_path": "vendor/kiwiclient/kiwirecorder.py",
+  "python": "python3",
+  "gps_utc_offset_s": 18,
+  "gps_offset_evidence": {
+    "url": "https://www.iers.org/IERS/EN/Publications/Bulletins/bulletins.html",
+    "note": "18 s for the August 2020 dataset. Verify the current offset before live capture."
+  },
+  "sources": [],
+  "targets": []
+}

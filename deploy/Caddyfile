@@ -1,0 +1,8 @@
+{$MERIDIAN_DOMAIN} {
+    encode zstd gzip
+    header Strict-Transport-Security "max-age=15552000"
+    request_body {
+        max_size 16KB
+    }
+    reverse_proxy app:3000
+}

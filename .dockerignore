@@ -1,0 +1,15 @@
+target
+node_modules
+.venv
+.git
+.secrets
+.env
+vendor
+data/captures
+data/datasets
+data/jobs
+data/state
+evidence
+*.tar.gz
+!third_party/*.tar.gz
+__pycache__

@@ -1,0 +1,20 @@
+# Render Free: testing only. Captures/jobs are lost on restart or spin-down.
+# This file creates no paid disk or database. See docs/RENDER.md before deployment.
+services:
+  - type: web
+    name: meridian-tdoa
+    runtime: docker
+    plan: free
+    region: frankfurt
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/ready
+    maxShutdownDelaySeconds: 190
+    autoDeployTrigger: "off"
+    envVars:
+      - key: PORT
+        value: "3000"
+      - key: MERIDIAN_CONFIG
+        value: /app/config/production.json
+      - key: MERIDIAN_ADMIN_TOKEN
+        generateValue: true

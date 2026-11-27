@@ -1,0 +1,41 @@
+   Compiling meridian-tdoa v0.2.0 (/workspace/tdoa-observatory)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.50s
+     Running unittests src/lib.rs (target/debug/build/meridian-tdoa/900ea36feec6eab4/out/meridian_tdoa-900ea36feec6eab4)
+
+running 9 tests
+test geo::tests::collinearity_rejected ... ok
+test geo::tests::dateline_intersection_is_not_a_worldwide_polygon ... ok
+test geo::tests::viewport_inside_polygon ... ok
+test kiwi::tests::rejects_audio_and_truncation ... ok
+test capture::tests::actual_status_is_accepted_but_api_optout_missing_policy_and_gnss_loss_are_refused ... ok
+test store::tests::restart_marks_inflight_job_interrupted_but_keeps_finished_results ... ok
+test directory::tests::published_access_and_gnss_are_required_and_catalog_is_not_rf_evidence ... ok
+test dsp::tests::recovers_delay_and_rejects_a_tone ... ok
+test protocol::tests::real_recording_matches_published_code_while_carrier_and_noise_do_not ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.64s
+
+     Running unittests src/main.rs (target/debug/build/meridian-tdoa/ff0ec81b1360d578/out/meridian_tdoa-ff0ec81b1360d578)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/pipeline.rs (target/debug/build/meridian-tdoa/8d0ead54a1ea6c54/out/pipeline-8d0ead54a1ea6c54)
+
+running 6 tests
+test no_permissions_means_no_network_capture ... ok
+test refuses_duplicate_captures_devices_and_missing_receivers ... ok
+test fourth_independent_receiver_can_remove_global_mirror_in_a_synthetic_geometry_test ... ok
+test actual_wav_metadata_loss_and_time_jump_are_rejected ... ok
+test too_short_real_iq_is_undetermined_without_claiming_no_emission ... ok
+test real_iq_retains_global_ambiguity_and_loss_of_sync_fails_closed ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.71s
+
+   Doc-tests meridian_tdoa
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

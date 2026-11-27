@@ -1,0 +1,70 @@
+{
+  "checked_at": "2026-11-26T20:01:11.831882+00:00",
+  "source": {
+    "updated": "Thursday, 26-Nov-2026 18:58:17 GMT",
+    "id": "0cb2b7d6cd86",
+    "status": "active",
+    "offline": false,
+    "name": "0-32 MHz KiwiSDR, PE1NOD. | High Tech Campus Eindhoven, The Netherlands.",
+    "sdr_hw": "KiwiSDR 1 v1.902 ⁣ 📡 GPS ⁣ ⏳ Limits ⁣ 📻 DRM ⁣⁣ 🌀D8.5",
+    "bands": [
+      0,
+      32000000
+    ],
+    "freq_offset": 0,
+    "mode": "rx4.wf4",
+    "users": 0,
+    "users_max": 4,
+    "ext_api": 4,
+    "preempt": 0,
+    "avatar_ctime": 1784779720,
+    "gps": [
+      51.413155,
+      5.459469
+    ],
+    "grid": "JO21rk",
+    "gps_good": 9,
+    "fixes": 449353,
+    "fixes_min": 29,
+    "fixes_hour": 1760,
+    "tdoa_id": "",
+    "tdoa_ch": 4,
+    "asl": 20,
+    "loc": "High Tech Campus Eindhoven, The Netherlands.",
+    "sw_version": "KiwiSDR_v1.902",
+    "antenna": "Active Rod Antenna",
+    "snr": [
+      31,
+      28
+    ],
+    "ant_connected": true,
+    "sm_cal": -13,
+    "wf_cal": -13,
+    "adc_ov": 2359663,
+    "clk_ext_freq": 66665900,
+    "clk_ext_gps": [
+      0,
+      1
+    ],
+    "uptime": 918531,
+    "gps_date": [
+      0,
+      0
+    ],
+    "date": "Thu Nov 26 18:58:17 2026",
+    "ip_blacklist": "2dbe9dff",
+    "dx_file": "1017,bf532d99,48778",
+    "debian": "D8.5",
+    "url": "http://82.139.82.247:8073",
+    "seq": 19,
+    "snr_all": 31,
+    "snr_hf": 28,
+    "flagged": false
+  },
+  "url": "http://82.139.82.247:8073/status",
+  "body": "status=active\noffline=no\nname=0-32 MHz KiwiSDR, PE1NOD. | High Tech Campus Eindhoven, The Netherlands.\nsdr_hw=KiwiSDR 1 v1.902 ⁣ 📡 GPS ⁣ ⏳ Limits ⁣ 📻 DRM ⁣\nop_email=[redacted: contact not required for RF validation]\nbands=0-32000000\nfreq_offset=0.000\nmode=rx4.wf4\nusers=0\nusers_max=4\next_api=4\npreempt=0\navatar_ctime=1784779720\ngps=(51.413155, 5.459469)\ngrid=JO21rk\ngps_good=11\nfixes=451198\nfixes_min=29\nfixes_hour=1760\ntdoa_id=\ntdoa_ch=4\nasl=20\nloc=High Tech Campus Eindhoven, The Netherlands.\nsw_version=KiwiSDR_v1.902\nantenna=Active Rod Antenna\nsnr=31,27\nant_connected=1\nsm_cal=-13\nwf_cal=-13\nadc_ov=2360040\nclk_ext_freq=66665900\nclk_ext_gps=0,1\nuptime=922305\ngps_date=0,0\ndate=Thu Nov 26 20:01:11 2026\nip_blacklist=2dbe9dff\ndx_file=1017,bf532d99,48778\n",
+  "error": null,
+  "redactions": [
+    "operator contact email (op_email); measurement fields unchanged"
+  ]
+}
