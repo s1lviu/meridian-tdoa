@@ -96,6 +96,16 @@ pub fn data_path(meta: &Path) -> PathBuf {
 }
 
 pub fn read(meta: &Path) -> Result<Recording> {
+    read_clock(meta, false)
+}
+
+/// A node may time a waveform on its own clock. Only server-side reference
+/// synchronization can then make its reports usable with other receivers.
+pub fn read_local(meta: &Path) -> Result<Recording> {
+    read_clock(meta, true)
+}
+
+fn read_clock(meta: &Path, allow_local: bool) -> Result<Recording> {
     let m: Value = serde_json::from_slice(
         &std::fs::read(meta).with_context(|| format!("Cannot read {}", meta.display()))?,
     )?;
@@ -120,7 +130,8 @@ pub fn read(meta: &Path) -> Result<Recording> {
         .context("Missing meridian:time_source")?
         .to_owned();
     ensure!(
-        TIME_SOURCES.contains(&time_source.as_str()),
+        TIME_SOURCES.contains(&time_source.as_str())
+            || (allow_local && time_source == "free_running"),
         "meridian:time_source {time_source} cannot support TDoA timing"
     );
     let time_sigma_ns = g["meridian:time_sigma_ns"]
@@ -176,10 +187,29 @@ pub fn read(meta: &Path) -> Result<Recording> {
             .all(|w| w[1].0 > w[0].0 && w[1].1 > w[0].1),
         "SigMF time anchors are not monotonic"
     );
-    let bytes = std::fs::read(data_path(meta)).context("Missing .sigmf-data")?;
+    let data = data_path(meta);
+    let size = std::fs::metadata(&data)
+        .context("Missing .sigmf-data")?
+        .len();
     ensure!(
-        bytes.len() <= 512 * 1024 * 1024,
+        size <= 512 * 1024 * 1024,
         "SigMF dataset larger than 512 MiB"
+    );
+    let stride = match datatype {
+        "ci16_le" | "ci16" => 4,
+        "cf32_le" | "cf32" => 8,
+        "cf64_le" | "cf64" => 16,
+        "ci8" | "cu8" => 2,
+        other => bail!("Unsupported SigMF datatype {other}"),
+    };
+    ensure!(
+        size > 0 && size % stride == 0,
+        "Incomplete complex sample in SigMF data"
+    );
+    let bytes = std::fs::read(&data)?;
+    ensure!(
+        bytes.len() as u64 == size,
+        "SigMF data changed while being read"
     );
     let samples = decode(datatype, &bytes)?;
     ensure!(
@@ -467,52 +497,52 @@ pub fn ingest(
         "At most {} receivers per event",
         crate::pipeline::MAX_RECEIVERS
     );
-    let recordings: Vec<Recording> = metas.iter().map(|m| read(m)).collect::<Result<_>>()?;
-    let center = center_hz.unwrap_or(recordings[0].frequency_hz);
-    for r in &recordings {
+    ensure!(
+        matches!(profile, crate::ft8_tdoa::PROFILE | crate::channel::PROFILE),
+        "Unsupported ingest profile {profile}"
+    );
+    let mut receivers = Vec::new();
+    let mut center = center_hz;
+    let mut first = chrono::DateTime::<chrono::Utc>::MAX_UTC;
+    let mut bytes = 0;
+    for meta in &metas {
+        // Validate one input at a time so wideband recordings from other receivers
+        // do not remain decoded in memory during admission.
+        let r = read(meta)?;
+        let hz = *center.get_or_insert(r.frequency_hz);
         ensure!(
-            (r.frequency_hz - center).abs() <= r.sample_rate / 2. - 6000.,
-            "{}: the 12 kHz channel at {center} Hz is outside this recording",
+            (r.frequency_hz - hz).abs() <= r.sample_rate / 2. - 6000.,
+            "{}: the 12 kHz channel at {hz} Hz is outside this recording",
             r.receiver_id
         );
-    }
-    let id = format!("ingest-{}", uuid::Uuid::new_v4());
-    let dir = dest.join(&id);
-    std::fs::create_dir_all(&dir)?;
-    let mut receivers = vec![];
-    for (meta, r) in metas.iter().zip(&recordings) {
-        let name = meta.file_name().unwrap();
-        std::fs::copy(meta, dir.join(name))?;
         let data = data_path(meta);
-        std::fs::copy(&data, dir.join(data.file_name().unwrap()))?;
+        bytes += std::fs::metadata(meta)?.len() + std::fs::metadata(&data)?.len();
+        first = first.min(
+            chrono::DateTime::from_timestamp(r.epoch_utc, 0).context("Invalid radio epoch")?
+                + chrono::Duration::nanoseconds((r.time_of(0.) * 1e9).round() as i64),
+        );
         receivers.push(Receiver {
             id: r.receiver_id.clone(),
-            label: r.hardware.clone().unwrap_or_else(|| r.receiver_id.clone()),
-            independent_device: r.receiver_id.clone(),
+            label: r.hardware.unwrap_or_else(|| r.receiver_id.clone()),
+            independent_device: r.receiver_id,
             position: r.position.context("Recording has no core:geolocation")?,
             position_evidence: Evidence {
                 url: "https://github.com/sigmf/SigMF".into(),
-                note: format!("core:geolocation of the node's own SigMF recording; time source {} (σ {} ns declared).", r.time_source, r.time_sigma_ns),
+                note: format!("Antenna geolocation from the node's SigMF recording. Time source {} with declared σ {} ns.", r.time_source, r.time_sigma_ns),
             },
             position_uncertainty_m: 0.,
-            file: name.to_string_lossy().into(),
-            sha256: crate::pipeline::checksum(&dir.join(data.file_name().unwrap()))?,
+            file: meta.file_name().unwrap().to_string_lossy().into(),
+            sha256: crate::pipeline::checksum(&data)?,
             timing_sigma_ns: Some(r.time_sigma_ns),
         });
     }
-    let first = recordings
-        .iter()
-        .map(|r| r.epoch_utc as f64 + r.anchors[0].1)
-        .fold(f64::INFINITY, f64::min);
-    let (kind, frequency, iq_center) = match profile {
-        crate::ft8_tdoa::PROFILE => (
-            "amateur_digital",
-            center - crate::ft8_tdoa::IQ_OFFSET_HZ,
-            center,
-        ),
-        crate::channel::PROFILE => ("monitored_channel", center, center),
-        other => anyhow::bail!("Unsupported ingest profile {other}"),
+    let iq_center = center.context("No recorded frequency")?;
+    let (kind, frequency) = if profile == crate::ft8_tdoa::PROFILE {
+        ("amateur_digital", iq_center - crate::ft8_tdoa::IQ_OFFSET_HZ)
+    } else {
+        ("monitored_channel", iq_center)
     };
+    let id = format!("ingest-{}", uuid::Uuid::new_v4());
     let m = Manifest {
         id: id.clone(),
         title: format!("Ingested SigMF · {} receivers", receivers.len()),
@@ -521,9 +551,7 @@ pub fn ingest(
         frequency_hz: frequency,
         capture_profile: Some(profile.into()),
         iq_center_hz: Some(iq_center),
-        capture_utc: chrono::DateTime::from_timestamp(first.floor() as i64, 0)
-            .unwrap()
-            .to_rfc3339(),
+        capture_utc: first.to_rfc3339(),
         gps_utc_offset_s,
         provenance: Evidence {
             url: "https://github.com/sigmf/SigMF".into(),
@@ -537,7 +565,21 @@ pub fn ingest(
         receivers,
         rejected_receivers: vec![],
     };
-    let path = dir.join("manifest.json");
-    crate::store::atomic_json(&path, &m)?;
-    Ok(path)
+    crate::pipeline::validate_manifest(&m)?;
+    let (dir, _reservation) = crate::retention::reserve(dest, &id, bytes + 65536)?;
+    let copied = (|| -> Result<PathBuf> {
+        for meta in metas {
+            let data = data_path(&meta);
+            for file in [&meta, &data] {
+                std::fs::copy(file, dir.join(file.file_name().unwrap()))?;
+            }
+        }
+        let path = dir.join("manifest.json");
+        crate::store::atomic_json(&path, &m)?;
+        Ok(path)
+    })();
+    if copied.is_err() {
+        std::fs::remove_dir_all(dir)?;
+    }
+    copied
 }

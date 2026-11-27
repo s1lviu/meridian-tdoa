@@ -90,7 +90,7 @@ fn plan_bands(
     rounds: &mut [usize],
     limit: usize,
     excluded: &HashSet<String>,
-    per_target: &std::collections::HashMap<String, HashSet<String>>,
+    per_target: &std::collections::HashMap<String, meridian_tdoa::db::Reception>,
 ) -> Vec<Result<(Config, Target)>> {
     let dynamic = |t: &Target| {
         limit > 0
@@ -127,16 +127,28 @@ fn plan_bands(
                 let round = rounds[i];
                 rounds[i] += 1;
                 let mut avoid = reserved.clone();
-                avoid.extend(per_target.get(&t.id).into_iter().flatten().cloned());
-                cfg.sources = directory
-                    .ok_or_else(|| anyhow::anyhow!("Receiver directory unavailable"))?
-                    .network_spaced(
-                        capture::iq_center(&t),
-                        round,
-                        limit,
-                        &avoid,
-                        t.min_spacing_km.unwrap_or(150.),
-                    )?;
+                let d =
+                    directory.ok_or_else(|| anyhow::anyhow!("Receiver directory unavailable"))?;
+                let center = capture::iq_center(&t);
+                let spacing = t.min_spacing_km.unwrap_or(150.);
+                let reception = per_target.get(&t.id);
+                if let Some(r) = reception {
+                    avoid.extend(r.quiet.iter().cloned());
+                }
+                // Alternate geographic discovery with measurement. Use existing scheduled
+                // windows as probes, so selecting receivers costs no extra connections.
+                cfg.sources =
+                    match reception.filter(|r| round % 2 == 1 && !r.strength_db.is_empty()) {
+                        Some(r) => {
+                            d.network_heard(center, round, limit, &avoid, spacing, &r.strength_db)?
+                        }
+                        None => {
+                            if t.verification.as_deref() == Some(meridian_tdoa::channel::PROFILE) {
+                                t.duration_s = t.duration_s.min(15);
+                            }
+                            d.network_spaced(center, round / 2, limit, &avoid, spacing)?
+                        }
+                    };
                 t.source_ids = cfg.sources.iter().map(|s| s.id.clone()).collect();
             }
             let sources = capture::authorize(&cfg, &t)?;
@@ -277,15 +289,13 @@ pub(super) async fn run(app: App, settings: MonitorConfig, targets: Vec<Target>)
             notice: None,
         };
         // Listen-then-measure: receivers that heard nothing on a band recently are skipped there.
-        let per_target: std::collections::HashMap<String, HashSet<String>> = bands
+        let per_target: std::collections::HashMap<_, _> = bands
             .iter()
             .filter_map(|&i| {
                 let key = super::channel_key(targets[i].frequency_hz);
                 Some((
                     targets[i].id.clone(),
-                    app.db
-                        .deaf_receivers(&key, Utc::now().timestamp_millis())
-                        .ok()?,
+                    app.db.reception(&key, Utc::now().timestamp_millis()).ok()?,
                 ))
             })
             .collect();
@@ -323,7 +333,8 @@ pub(super) async fn run(app: App, settings: MonitorConfig, targets: Vec<Target>)
                     .downcast_ref::<std::io::Error>()
                     .is_some_and(|e| e.kind() == std::io::ErrorKind::StorageFull)
                 {
-                    break "IQ archive is full. Archive data before restarting the monitor.".into();
+                    app.monitor.write().unwrap().notice =
+                        Some("Window skipped: insufficient space under the IQ quota".into());
                 }
                 continue;
             }
@@ -338,11 +349,7 @@ pub(super) async fn run(app: App, settings: MonitorConfig, targets: Vec<Target>)
             for (id, capture) in work_ids.iter().cloned().zip(captures) {
                 let app = window_app.clone();
                 tasks.spawn(async move {
-                    let duration = capture.target().duration_s;
-                    let result = capture::record(capture).await;
-                    if let Ok(manifest) = &result {
-                        account(&app, manifest.parent().unwrap_or(Path::new(".")), duration);
-                    }
+                    let result = capture::record(capture, &app.db).await;
                     finish(app, id, result, None).await;
                 });
             }
@@ -378,11 +385,6 @@ pub(super) async fn run(app: App, settings: MonitorConfig, targets: Vec<Target>)
     let mut status = app.monitor.write().unwrap();
     status.next_at = None;
     status.notice = Some(paused);
-}
-
-/// Fair-use accounting for every receiver contacted by a capture.
-pub(super) fn account(app: &App, capture_dir: &Path, duration_s: u64) {
-    app.db.account(capture_dir, duration_s);
 }
 
 #[cfg(test)]
@@ -437,6 +439,7 @@ mod tests {
         );
         // Windows on disjoint receivers may overlap in time: no global cooldown or archive lock.
         let first = capture::reserve_window(vec![plans[0].clone()], tmp.path()).unwrap();
+        assert!(capture::reserve_window(vec![plans[0].clone()], tmp.path()).is_err());
         let second = capture::reserve_window(vec![plans[1].clone()], tmp.path()).unwrap();
         assert_eq!(first.len() + second.len(), 2);
         // Excluded receivers (blocked, out of budget or leased) are never selected.

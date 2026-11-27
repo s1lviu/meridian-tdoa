@@ -7,6 +7,7 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { cpSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { createServer } from "node:net";
 import { join, resolve } from "node:path";
 
 const repo = resolve(new URL("..", import.meta.url).pathname);
@@ -24,10 +25,16 @@ config.nodes = Object.entries(nodes).map(([id, [lat, lon]]) => ({
   position_evidence: { url: "https://example.org/simulated", note: "simulated node" },
   token_sha256: createHash("sha256").update(tokens[id]).digest("hex"),
 }));
+const available = createServer();
+await new Promise((resolve, reject) => available.once("error", reject).listen(0, "127.0.0.1", resolve));
+const port = available.address().port;
+await new Promise((resolve) => available.close(resolve));
+config.listen = `127.0.0.1:${port}`;
 writeFileSync(join(work, "config.json"), JSON.stringify(config));
-const port = 3900 + Math.floor(Math.random() * 90);
-const base = `http://127.0.0.1:${port}`;
-const server = spawn(binary, [], { cwd: work, env: { ...process.env, MERIDIAN_CONFIG: "config.json", PORT: String(port), MERIDIAN_DIRECTORY_OFFLINE: "1" }, stdio: "ignore" });
+const base = `http://${config.listen}`;
+const env = { ...process.env, MERIDIAN_CONFIG: "config.json", MERIDIAN_DIRECTORY_OFFLINE: "1" };
+delete env.PORT;
+const server = spawn(binary, [], { cwd: work, env, stdio: "ignore" });
 const checks = [];
 const ok = (label) => { checks.push(label); console.log("PASS", label); };
 const C = 299792.458;
@@ -64,6 +71,8 @@ try {
   ok("GNSS-loss replay: receiver excluded, no region drawn");
 
   // Live: five GNSS-disciplined nodes report one target; the server locates and registers it.
+  await page.locator("#mode-live").click();
+  await page.waitForFunction(() => document.querySelector("#stats-body")?.innerText.includes("No live observation"));
   const target = [44.36, 26.2];
   const now = Date.now() / 1000;
   for (const [id, p] of Object.entries(nodes)) {
@@ -74,8 +83,9 @@ try {
     });
     assert.equal(r.status, 200);
   }
-  await page.locator("#mode-live").click();
   await page.waitForFunction(() => document.querySelectorAll("#track-list li").length > 0, null, { timeout: 15000 });
+  await page.waitForFunction(() => /s \(1\)/.test(document.querySelector(".paint-delay")?.textContent || ""));
+  ok("foreground live map measures RF-to-display latency from the hardware timestamp");
   await page.locator("#track-list li button").first().click();
   await page.locator("#inspector").waitFor({ state: "visible" });
   assert.match(await page.locator("#inspector").innerText(), /Fused fixes/);

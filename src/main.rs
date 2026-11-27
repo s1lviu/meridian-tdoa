@@ -38,8 +38,7 @@ struct App {
     leases: Arc<Mutex<HashSet<String>>>,
     /// Node clocks (reference-emitter synchronization) and detections awaiting association.
     clocks: Arc<Mutex<meridian_tdoa::sync::Network>>,
-    pending:
-        Arc<Mutex<HashMap<String, (std::time::Instant, f64, Vec<meridian_tdoa::sync::Detection>)>>>,
+    pending: Arc<Mutex<HashMap<(u64, String), PendingSignal>>>,
     /// Server-sent events: one JSON message whenever observations or tracks change.
     events: tokio::sync::broadcast::Sender<String>,
     datasets: Arc<Vec<(Manifest, PathBuf)>>,
@@ -108,6 +107,23 @@ struct Selection {
     mode: String,
     fault: bool,
 }
+fn band_range(band: Option<&str>) -> Result<(f64, f64), Error> {
+    Ok(match band.unwrap_or("all") {
+        "all" => (0., 6e9_f64.next_up()),
+        "lf" => (0., 300e3),
+        "mf" => (300e3, 3e6),
+        "hf" => (3e6, 30e6),
+        "vhf" => (30e6, 300e6),
+        "uhf" => (300e6, 3e9),
+        "shf" => (3e9, 6e9_f64.next_up()),
+        "other" => (f64::INFINITY, f64::INFINITY),
+        name => bands::BANDS
+            .iter()
+            .find(|(band, _, _)| *band == name)
+            .map(|(_, lo, hi)| (lo * 1e6, hi * 1e6))
+            .ok_or(bad("Unknown band"))?,
+    })
+}
 fn selection(q: Filters) -> Result<Selection, Error> {
     let bbox = if let Some(raw) = q.bbox {
         let a = raw
@@ -128,20 +144,7 @@ fn selection(q: Filters) -> Result<Selection, Error> {
     } else {
         None
     };
-    let (low, high) = match q.band.as_deref().unwrap_or("all") {
-        "all" => (0., 6e9),
-        "lf" => (0., 300e3),
-        "mf" => (300e3, 3e6),
-        "hf" => (3e6, 30e6),
-        "vhf" => (30e6, 300e6),
-        "uhf" => (300e6, 3e9),
-        "other" => (f64::INFINITY, f64::INFINITY),
-        name => bands::BANDS
-            .iter()
-            .find(|(band, _, _)| *band == name)
-            .map(|(_, lo, hi)| (lo * 1e6, hi * 1e6))
-            .ok_or(bad("Unknown band"))?,
-    };
+    let (low, high) = band_range(q.band.as_deref())?;
     let parse = |s: &str| {
         DateTime::parse_from_rfc3339(s)
             .map(|t| t.with_timezone(&Utc))
@@ -149,7 +152,7 @@ fn selection(q: Filters) -> Result<Selection, Error> {
     };
     let start = parse(q.start.as_deref().unwrap_or("2000-01-01T00:00:00Z"))?;
     let end = parse(q.end.as_deref().unwrap_or("2100-01-01T00:00:00Z"))?;
-    if end <= start {
+    if end.timestamp_millis() <= start.timestamp_millis() {
         return Err(bad("UTC interval must be increasing"));
     }
     let mode = q.mode.unwrap_or("replay".into());
@@ -372,12 +375,12 @@ async fn tracks(State(app): State<App>, Query(q): Query<TrackQuery>) -> Api<Valu
         }
         None => None,
     };
+    let (low, high) = band_range(q.band.as_deref())?;
     let rows: Vec<Value> = app
         .db
-        .tracks(since, 5000)
+        .tracks_in_band(since, low, high)
         .map_err(internal)?
         .into_iter()
-        .filter(|t| q.band.as_deref().is_none_or(|b| b == "all" || t.band.as_deref() == Some(b)))
         .filter(|t| {
             bbox.is_none_or(|[w, s, e, n]| {
                 let lon_ok = if w <= e { t.center.lon >= w && t.center.lon <= e } else { t.center.lon >= w || t.center.lon <= e };
@@ -428,25 +431,16 @@ async fn stats(State(app): State<App>, Query(q): Query<StatsQuery>) -> Api<Value
     };
     let end = parse(q.end.as_deref(), Utc::now())?;
     let start = parse(q.start.as_deref(), end - chrono::Duration::hours(24))?;
-    if end <= start {
+    if end.timestamp_millis() <= start.timestamp_millis() {
         return Err(bad("UTC interval must be increasing"));
     }
-    let rows = app
-        .db
-        .emissions(&db::Query {
-            mode: "live".into(),
-            fault: false,
-            low_hz: 0.,
-            high_hz: 6e9,
-            start_ms: start.timestamp_millis(),
-            end_ms: end.timestamp_millis(),
-            limit: 200_000,
-        })
+    let database = app.db.clone();
+    let rows = tokio::task::spawn_blocking(move || evaluation::summary(&database, start, end))
+        .await
+        .map_err(internal)?
         .map_err(internal)?;
-    Ok(Json(
-        json!({"start":start,"end":end,"rows":evaluation::summary(&rows),
-        "note":"Errors are post-hoc distances to a hold-out reference (published DCF77/IBP positions, or the locator a station sent in its own FT8 message). The solver never sees them."}),
-    ))
+    Ok(Json(json!({"start":start,"end":end,"rows":rows,
+        "note":"Errors are post-hoc distances to a hold-out reference (published DCF77/IBP positions, or the locator a station sent in its own FT8 message). The solver never sees them."})))
 }
 async fn receiver_health(State(app): State<App>) -> Api<Value> {
     Ok(Json(
@@ -459,6 +453,12 @@ struct DetectionBatch {
     detections: Vec<meridian_tdoa::sync::Detection>,
     #[serde(default)]
     frequency_hz: f64,
+}
+struct PendingSignal {
+    first_utc: DateTime<Utc>,
+    last_change: std::time::Instant,
+    dirty: bool,
+    reports: Vec<meridian_tdoa::sync::Detection>,
 }
 /// Node arrival-time reports. Each node authenticates with its own bearer token (hashed in config).
 async fn detections(
@@ -479,22 +479,42 @@ async fn detections(
         .iter()
         .find(|n| n.token_sha256 == hash)
         .ok_or(Error(StatusCode::UNAUTHORIZED, "Unknown node token".into()))?;
-    if b.detections.len() > 1000
+    if !(1. ..=6e9).contains(&b.frequency_hz)
+        || b.detections.len() > 1000
         || b.detections.iter().any(|d| {
-            d.node != node.id || !d.local_s.is_finite() || !(d.sigma_s > 0. && d.sigma_s < 1.)
+            d.node != node.id
+                || d.signal.is_empty()
+                || d.signal.len() > 200
+                || (node.disciplined && d.free_running)
+                || !d.local_s.is_finite()
+                || !(d.sigma_s > 0. && d.sigma_s < 1.)
         })
     {
         return Err(bad(
-            "Detections must come from the authenticated node, with finite times and 0 < σ < 1 s",
+            "Invalid frequency, signal, clock declaration or arrival measurement for this node",
         ));
     }
     let mut pending = app.pending.lock().unwrap();
     for d in b.detections {
         let entry = pending
-            .entry(d.signal.clone())
-            .or_insert_with(|| (std::time::Instant::now(), b.frequency_hz, vec![]));
-        entry.2.retain(|x| x.node != d.node);
-        entry.2.push(d);
+            .entry((b.frequency_hz.round() as u64, d.signal.clone()))
+            .or_insert_with(|| PendingSignal {
+                first_utc: Utc::now(),
+                last_change: std::time::Instant::now(),
+                dirty: false,
+                reports: vec![],
+            });
+        if !entry.reports.iter().any(|x| {
+            x.node == d.node
+                && x.local_s == d.local_s
+                && x.sigma_s == d.sigma_s
+                && x.transmitter == d.transmitter
+        }) {
+            entry.reports.retain(|x| x.node != d.node);
+            entry.reports.push(d);
+            entry.last_change = std::time::Instant::now();
+            entry.dirty = true;
+        }
     }
     Ok(Json(
         json!({"accepted":true,"pending_signals":pending.len()}),
@@ -528,17 +548,23 @@ async fn clock_state(State(app): State<App>) -> Json<Value> {
 }
 /// Associate pending detections after a short window: references update clocks, targets are solved.
 fn settle_detections(app: &App) {
-    let ready: Vec<(String, f64, Vec<meridian_tdoa::sync::Detection>)> = {
+    let ready = {
         let mut pending = app.pending.lock().unwrap();
-        let keys: Vec<String> = pending
-            .iter()
-            .filter(|(_, (at, _, _))| at.elapsed() >= std::time::Duration::from_secs(2))
-            .map(|(k, _)| k.clone())
-            .collect();
-        let mut ready: Vec<_> = keys
-            .into_iter()
-            .filter_map(|k| pending.remove(&k).map(|(_, f, d)| (k, f, d)))
-            .collect();
+        let mut ready = vec![];
+        // A slower node can improve the original observation during one capture window.
+        pending.retain(|(frequency, signal), event| {
+            let age = event.last_change.elapsed().as_secs();
+            if event.dirty && age >= 2 {
+                ready.push((
+                    signal.clone(),
+                    *frequency as f64,
+                    event.reports.clone(),
+                    event.first_utc,
+                ));
+                event.dirty = false;
+            }
+            age < 120
+        });
         // Clock filters need events in time order; the map has none.
         ready.sort_by(|a, b| {
             let t = |d: &[meridian_tdoa::sync::Detection]| {
@@ -555,13 +581,21 @@ fn settle_detections(app: &App) {
         .map(|n| (n.id.clone(), n.position))
         .collect();
     let mut stored = vec![];
-    for (signal, frequency, seen) in ready {
-        if let Some(r) = app
-            .config
-            .reference_emitters
+    for (signal, frequency, seen, first_utc) in ready {
+        let calls: HashSet<_> = seen
             .iter()
-            .find(|r| signal.starts_with(&r.signal_prefix))
-        {
+            .filter_map(|d| d.transmitter.as_deref())
+            .collect();
+        if let Some(r) = app.config.reference_emitters.iter().find(|r| {
+            !r.signal_prefix.is_empty()
+                && signal.starts_with(&r.signal_prefix)
+                && r.frequency_hz.is_none_or(|hz| hz.round() == frequency)
+                && r.callsign
+                    .as_ref()
+                    .is_none_or(|call| calls.len() == 1 && calls.contains(call.as_str()))
+                && pipeline::valid_position(r.position)
+                && pipeline::valid_evidence(&r.evidence)
+        }) {
             app.clocks
                 .lock()
                 .unwrap()
@@ -581,13 +615,35 @@ fn settle_detections(app: &App) {
             .unwrap()
             .corrected_with(&seen, &disciplined);
         if arrivals.len() >= 3 {
-            stored.push(meridian_tdoa::sync::emission(
+            let utc = if disciplined.is_empty() {
+                first_utc
+            } else {
+                let s = arrivals.iter().map(|a| a.1).fold(f64::INFINITY, f64::min);
+                let Some(utc) =
+                    DateTime::from_timestamp(s.floor() as i64, (s.rem_euclid(1.) * 1e9) as u32)
+                else {
+                    continue;
+                };
+                utc
+            };
+            let mut e = meridian_tdoa::sync::emission(
                 &signal,
                 &arrivals,
                 &app.config.nodes,
                 frequency,
-                Utc::now(),
-            ));
+                utc,
+            );
+            if let Some(r) = &mut e.reference {
+                r.node_utc = Some(!disciplined.is_empty());
+            }
+            e.id = format!("mlat-{frequency:.0}-{signal}");
+            if signal.starts_with("ft8-") {
+                if calls.len() == 1 {
+                    e.identity = Some(meridian_tdoa::model::Identity {callsign:calls.iter().next().unwrap().to_string(),
+                        evidence: meridian_tdoa::model::Evidence {url:e.provenance.url.clone(),note:"Transmitter decoded locally from the same FT8 payload at a reporting node.".into()}});
+                }
+            }
+            stored.push(e);
         }
     }
     if !stored.is_empty() {
@@ -792,18 +848,21 @@ fn record_job(app: &App, id: String, mut value: Value) {
     }
 }
 /// Decide how long the capture's raw IQ is kept, then apply the time rules immediately.
-fn retire_capture(app: &App, manifest: &Path, verified: bool) {
+fn retire_capture(policy: &retention::Policy, manifest: &Path, verified: bool) {
     let (Some(dir), Ok(captures)) = (manifest.parent(), Path::new("data/captures").canonicalize())
     else {
         return;
     };
-    if !dir.canonicalize().is_ok_and(|d| d.starts_with(&captures)) {
+    if !dir
+        .canonicalize()
+        .is_ok_and(|d| d.parent() == Some(captures.as_path()))
+    {
         return; // replays and imported datasets are never retired
     }
     if let Err(e) = retention::mark(dir, verified) {
         eprintln!("Retention marker failed: {e}");
     }
-    if let Err(e) = retention::sweep(&captures, &app.config.retention, Utc::now()) {
+    if let Err(e) = retention::sweep(&captures, policy, Utc::now()) {
         eprintln!("IQ retention sweep failed: {e}");
     }
 }
@@ -823,38 +882,44 @@ fn process_ibp(db: &Db, path: &Path, capture_id: &str) -> anyhow::Result<(Vec<Em
     let (emissions, summary) = if m.capture_profile.as_deref() == Some(ft8_tdoa::PROFILE) {
         let a = ft8_tdoa::analyze(path)?;
         if a.sampled_slots > 0 {
-            db.record_decodes(
-                &channel_key(m.frequency_hz),
-                &a.receiver_decodes,
-                Utc::now().timestamp_millis(),
-            )?;
+            let mut strength = HashMap::<&str, f64>::new();
+            for r in a
+                .emissions
+                .iter()
+                .flat_map(|e| &e.receivers)
+                .filter(|r| r.confirmed)
+            {
+                let snr = r.signal_score_db;
+                strength
+                    .entry(&r.receiver.id)
+                    .and_modify(|v| *v = v.max(snr))
+                    .or_insert(snr);
+            }
+            db.record_listen(&m, &a.receiver_decodes, &strength)?;
         }
         let s = a.summary(capture_id);
         (a.emissions, s)
     } else if m.capture_profile.as_deref() == Some(meridian_tdoa::channel::PROFILE) {
         let a = meridian_tdoa::channel::analyze(path)?;
         // Listen-then-measure evidence: how many sub-band emissions each receiver confirmed.
-        let counts: Vec<(String, usize)> = m
-            .receivers
-            .iter()
-            .map(|r| {
-                let n = a
-                    .emissions
-                    .iter()
-                    .filter(|e| {
-                        e.receivers
-                            .iter()
-                            .any(|x| x.receiver.id == r.id && x.confirmed)
-                    })
-                    .count();
-                (r.id.clone(), n)
-            })
-            .collect();
-        db.record_decodes(
-            &channel_key(m.frequency_hz),
-            &counts,
-            Utc::now().timestamp_millis(),
-        )?;
+        let mut strength = HashMap::<&str, f64>::new();
+        let mut counts = Vec::new();
+        for (i, id) in a.listened.iter().enumerate() {
+            let mut heard = 0;
+            for (e, seg) in a.emissions.iter().zip(&a.segments) {
+                if e.receivers[i].confirmed {
+                    heard += 1;
+                    if let Some(snr) = seg.receiver_snr_db[i] {
+                        strength
+                            .entry(id)
+                            .and_modify(|v| *v = v.max(snr))
+                            .or_insert(snr);
+                    }
+                }
+            }
+            counts.push((id.clone(), heard));
+        }
+        db.record_listen(&m, &counts, &strength)?;
         let ids: Vec<_> = a
             .emissions
             .iter()
@@ -873,15 +938,15 @@ fn process_ibp(db: &Db, path: &Path, capture_id: &str) -> anyhow::Result<(Vec<Em
     db.replace_dataset(capture_id, &emissions)?;
     Ok((emissions, summary))
 }
-/// Raw IQ worth keeping: a verified callsign (IBP) or a transmission timed at two receivers (FT8).
+/// Keep positively correlated IQ under the verified TTL, including anonymous signals.
 fn worth_keeping(rows: &[Emission]) -> bool {
     rows.iter().any(|e| {
-        e.identity.is_some()
-            && (e
-                .reference
-                .as_ref()
-                .is_some_and(|r| r.profile == ibp::PROFILE)
-                || e.receivers.iter().filter(|r| r.confirmed).count() >= 2)
+        e.detected
+            && (e.pairs.iter().any(|p| p.accepted)
+                || (e.identity.is_some()
+                    && e.reference
+                        .as_ref()
+                        .is_some_and(|r| r.profile == ibp::PROFILE)))
     })
 }
 async fn finish(app: App, id: String, path: Result<PathBuf, anyhow::Error>, fault: Option<String>) {
@@ -899,7 +964,7 @@ async fn finish(app: App, id: String, path: Result<PathBuf, anyhow::Error>, faul
                             .and_then(|v| v);
                     let mut value = match result {
                         Ok((rows, summary)) => {
-                            retire_capture(&app, p, worth_keeping(&rows));
+                            retire_capture(&app.config.retention, p, worth_keeping(&rows));
                             summary
                         }
                         Err(err) => {
@@ -918,8 +983,17 @@ async fn finish(app: App, id: String, path: Result<PathBuf, anyhow::Error>, faul
                     return;
                 }
                 if m.mode == "live" && !m.emission_verified {
-                    // Kept for the review window, then expires like verified IQ.
-                    retire_capture(&app, p, true);
+                    if m.capture_profile.as_deref() == Some(meridian_tdoa::protocol::PROFILE) {
+                        retire_capture(&app.config.retention, p, false);
+                        record_job(
+                            &app,
+                            id.clone(),
+                            json!({"id":id,"status":"completed","capture_id":m.id,"detected":false,"message":"DCF77 phase code was not verified on sufficient receivers."}),
+                        );
+                        return;
+                    }
+                    // User-reviewed profiles keep a bounded review window.
+                    retire_capture(&app.config.retention, p, true);
                     record_job(
                         &app,
                         id.clone(),
@@ -940,7 +1014,7 @@ async fn finish(app: App, id: String, path: Result<PathBuf, anyhow::Error>, faul
     };
     if let (Some(m), Ok(e)) = (&manifest, &result) {
         if e.mode == "live" {
-            retire_capture(&app, m, e.detected);
+            retire_capture(&app.config.retention, m, e.detected);
         }
     }
     let value = match result {
@@ -1094,13 +1168,7 @@ async fn start_capture(
     let job_id = id.clone();
     tokio::spawn(async move {
         let _guard = guard;
-        let result = capture::capture(&config, &target, Path::new("data/captures")).await;
-        if let Ok(manifest) = &result {
-            app.db.account(
-                manifest.parent().unwrap_or(Path::new(".")),
-                target.duration_s,
-            );
-        }
+        let result = capture::capture(&config, &target, Path::new("data/captures"), &app.db).await;
         finish(app, job_id, result, None).await;
     });
     Ok(Json(json!({"job_id":id})))
@@ -1195,11 +1263,22 @@ fn migrate(db: &Db) -> anyhow::Result<(usize, usize)> {
             && !path
                 .file_name()
                 .and_then(|s| s.to_str())
-                .is_some_and(|n| n.starts_with("live-"))
+                .is_some_and(|n| n.starts_with("live-") || n.ends_with("-slots.json"))
         {
             let e: Emission = serde_json::from_slice(&std::fs::read(&path)?)?;
             if e.mode == "replay" {
-                replays.push(e);
+                // The native data volume may still hold the previous release's replay
+                // files. Refresh the bundled IDs in SQLite without altering that archive.
+                let current = match e.id.as_str() {
+                    "dcf77-20200813" => serde_json::from_slice(include_bytes!(
+                        "../data/results/dcf77-20200813.json"
+                    ))?,
+                    "dcf77-20200813-sync-loss" => serde_json::from_slice(include_bytes!(
+                        "../data/results/dcf77-20200813-sync-loss.json"
+                    ))?,
+                    _ => e,
+                };
+                replays.push(current);
             }
         }
     }
@@ -1213,9 +1292,57 @@ async fn main() -> anyhow::Result<()> {
     // An unknown word must never fall through to starting the server.
     if let Some(cmd) = args.get(1) {
         anyhow::ensure!(
-            ["discover", "process", "capture", "calibrate", "ingest"].contains(&cmd.as_str()),
-            "Unknown command {cmd}. Use: discover | process MANIFEST [FAULT_RECEIVER] | capture TARGET_ID | calibrate [ft8] | ingest DIR [--profile P] [--center HZ]"
+            [
+                "discover",
+                "process",
+                "capture",
+                "calibrate",
+                "ingest",
+                "import",
+                "stats"
+            ]
+            .contains(&cmd.as_str()),
+            "Unknown command {cmd}. Use: import [OBSERVATIONS.json] | stats [START END] | discover | process MANIFEST [FAULT_RECEIVER] | capture TARGET_ID | calibrate [ft8] | ingest DIR [--profile P] [--center HZ]"
         );
+    }
+    if args.get(1).is_some_and(|v| v == "import") {
+        let db = Db::open(Path::new("data/meridian.sqlite"))?;
+        let (mut observations, jobs) = migrate(&db)?;
+        match &args[2..] {
+            [] => {}
+            [path] => {
+                let rows = serde_json::from_reader(std::fs::File::open(path)?)?;
+                observations += db.import_observations(rows)?;
+            }
+            _ => anyhow::bail!("import [OBSERVATIONS.json]"),
+        }
+        println!(
+            "{}",
+            json!({"imported_observations":observations,"imported_jobs":jobs})
+        );
+        return Ok(());
+    }
+    if args.get(1).is_some_and(|v| v == "stats") {
+        let (start, end) = match &args[2..] {
+            [] => {
+                let end = Utc::now();
+                (end - chrono::Duration::hours(24), end)
+            }
+            [start, end] => (start.parse()?, end.parse()?),
+            _ => anyhow::bail!("stats [START_UTC END_UTC]"),
+        };
+        anyhow::ensure!(
+            end.timestamp_millis() > start.timestamp_millis(),
+            "UTC interval must span at least one millisecond"
+        );
+        let db = Db::open(Path::new("data/meridian.sqlite"))?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(
+                &json!({"start":start,"end":end,"rows":evaluation::summary(&db,start,end)?})
+            )?
+        );
+        return Ok(());
     }
     if args.get(1).is_some_and(|v| v == "discover") {
         let d = directory::refresh(Path::new("data/state/directory.json")).await?;
@@ -1279,18 +1406,37 @@ async fn main() -> anyhow::Result<()> {
             .get(2)
             .ok_or_else(|| anyhow::anyhow!("process MANIFEST [FAULT_RECEIVER]"))?;
         let m: Manifest = serde_json::from_slice(&std::fs::read(path)?)?;
+        let policy = if m.mode == "live" {
+            let path =
+                std::env::var("MERIDIAN_CONFIG").unwrap_or_else(|_| "config/app.json".into());
+            if Path::new(&path).is_file() || std::env::var_os("MERIDIAN_CONFIG").is_some() {
+                serde_json::from_slice::<Config>(&std::fs::read(path)?)?.retention
+            } else {
+                retention::Policy::default()
+            }
+        } else {
+            retention::Policy::default()
+        };
         if slot_profile(&m) {
             anyhow::ensure!(
                 args.get(3).is_none(),
                 "Fault injection is available for replays"
             );
             let db = Db::open(Path::new("data/meridian.sqlite"))?;
-            let (_, summary) = process_ibp(&db, Path::new(path), &m.id)?;
+            let (rows, summary) = process_ibp(&db, Path::new(path), &m.id)?;
+            if m.mode == "live" {
+                retire_capture(&policy, Path::new(path), worth_keeping(&rows));
+            }
             println!("{}", serde_json::to_string_pretty(&summary)?);
             return Ok(());
         }
         let e = pipeline::process(Path::new(path), args.get(3).map(String::as_str))?;
-        pipeline::save(&e, Path::new("data/results"))?;
+        if e.mode == "live" {
+            Db::open(Path::new("data/meridian.sqlite"))?.put_emissions(std::slice::from_ref(&e))?;
+            retire_capture(&policy, Path::new(path), e.detected);
+        } else {
+            pipeline::save(&e, Path::new("data/results"))?;
+        }
         println!("{}", serde_json::to_string_pretty(&e)?);
         return Ok(());
     }
@@ -1324,7 +1470,8 @@ async fn main() -> anyhow::Result<()> {
         )?;
         let db = Db::open(Path::new("data/meridian.sqlite"))?;
         let m: Manifest = serde_json::from_slice(&std::fs::read(&manifest)?)?;
-        let (_, summary) = process_ibp(&db, &manifest, &m.id)?;
+        let (rows, summary) = process_ibp(&db, &manifest, &m.id)?;
+        retire_capture(&config.retention, &manifest, worth_keeping(&rows));
         println!("{}", serde_json::to_string_pretty(&summary)?);
         return Ok(());
     }
@@ -1369,10 +1516,11 @@ async fn main() -> anyhow::Result<()> {
                 &cfg.receivers,
                 target.duration_s as f64,
             )?;
-            excluded.extend(db.deaf_receivers(
+            let reception = db.reception(
                 &channel_key(target.frequency_hz),
                 Utc::now().timestamp_millis(),
-            )?);
+            )?;
+            excluded.extend(reception.quiet);
             let round = match flag("--near") {
                 Some(p) => {
                     let (lat, lon) = p
@@ -1389,27 +1537,28 @@ async fn main() -> anyhow::Result<()> {
                 }
                 None => 0,
             };
-            cfg.sources = d.network_spaced(
-                center,
-                round,
-                n,
-                &excluded,
-                target.min_spacing_km.unwrap_or(150.),
-            )?;
+            cfg.sources = if flag("--near").is_none() {
+                d.network_heard(
+                    center,
+                    round,
+                    n,
+                    &excluded,
+                    target.min_spacing_km.unwrap_or(150.),
+                    &reception.strength_db,
+                )?
+            } else {
+                d.network_spaced(
+                    center,
+                    round,
+                    n,
+                    &excluded,
+                    target.min_spacing_km.unwrap_or(150.),
+                )?
+            };
             target.source_ids = cfg.sources.iter().map(|s| s.id.clone()).collect();
         }
-        let result = capture::capture(&cfg, &target, Path::new("data/captures")).await;
         let db = Db::open(Path::new("data/meridian.sqlite"))?;
-        // Account even for a failed attempt: the newest capture directory holds the outcomes.
-        if let Some(dir) = std::fs::read_dir("data/captures")?
-            .flatten()
-            .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
-            .max()
-            .map(|(_, p)| p)
-        {
-            db.account(&dir, target.duration_s);
-        }
-        let manifest = result?;
+        let manifest = capture::capture(&cfg, &target, Path::new("data/captures"), &db).await?;
         println!("{}", manifest.display());
         return Ok(());
     }
@@ -1464,13 +1613,22 @@ async fn main() -> anyhow::Result<()> {
         .map(|p| format!("0.0.0.0:{p}"))
         .unwrap_or_else(|_| config.listen.clone());
     let parallel = config.max_parallel_jobs.max(1);
+    let network = meridian_tdoa::sync::Network {
+        master: config
+            .nodes
+            .iter()
+            .filter(|n| n.disciplined)
+            .map(|n| n.id.clone())
+            .min(),
+        ..Default::default()
+    };
     let app = App {
         config: Arc::new(config),
         db,
         persistence_failures: Arc::new(Mutex::new(HashSet::new())),
         workers: Arc::new(tokio::sync::Semaphore::new(parallel)),
         leases: Arc::new(Mutex::new(HashSet::new())),
-        clocks: Arc::new(Mutex::new(meridian_tdoa::sync::Network::default())),
+        clocks: Arc::new(Mutex::new(network)),
         pending: Arc::new(Mutex::new(HashMap::new())),
         events: tokio::sync::broadcast::channel(64).0,
         datasets: Arc::new(datasets),
@@ -1519,7 +1677,7 @@ async fn main() -> anyhow::Result<()> {
             if let Ok(marker) = push_app.db.change_marker() {
                 if last != Some(marker) {
                     if last.is_some() {
-                        let (start, rows, track) = marker;
+                        let (start, rows, track, _) = marker;
                         let _ = push_app.events.send(
                             json!({"latest_live":start.and_then(DateTime::from_timestamp_millis),"live_rows":rows,
                                 "tracks_updated":track.and_then(DateTime::from_timestamp_millis)}).to_string(),
@@ -1570,7 +1728,9 @@ async fn main() -> anyhow::Result<()> {
                             offset,
                         )?;
                         let m: Manifest = serde_json::from_slice(&std::fs::read(&manifest)?)?;
-                        Ok(process_ibp(&app.db, &manifest, &m.id)?.1)
+                        let (rows, summary) = process_ibp(&app.db, &manifest, &m.id)?;
+                        retire_capture(&app.config.retention, &manifest, worth_keeping(&rows));
+                        Ok(summary)
                     };
                     match run() {
                         Ok(summary) => {

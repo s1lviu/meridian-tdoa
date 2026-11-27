@@ -264,12 +264,15 @@ pub fn correlate_with(
 }
 
 /// Occupied sub-band of a channel.
-#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Segment {
     pub low_hz: f64,
     pub high_hz: f64,
     /// Peak of the combined normalized PSD over the noise median, dB.
     pub peak_db: f64,
+    /// Mean in-band signal power above this receiver's spectral noise floor.
+    #[serde(default)]
+    pub receiver_snr_db: Vec<Option<f64>>,
 }
 
 /// Upper quantile of χ²_ν by Wilson–Hilferty (accurate for ν ≳ 10).
@@ -292,10 +295,12 @@ pub fn occupied(streams: &[&[Complex<f64>]], fs: f64, passband_hz: f64) -> Vec<S
         .map(|i| 0.5 - 0.5 * (std::f64::consts::TAU * i as f64 / n as f64).cos())
         .collect();
     let mut combined = vec![0.; n];
+    let mut spectra = Vec::with_capacity(streams.len());
     let mut k_segments = usize::MAX;
     let mut used = 0;
     for x in streams {
         if x.len() < n {
+            spectra.push(Vec::new());
             continue;
         }
         let mut psd = vec![0.; n];
@@ -315,9 +320,11 @@ pub fn occupied(streams: &[&[Complex<f64>]], fs: f64, passband_hz: f64) -> Vec<S
             start += hop;
         }
         let med = median(&psd).max(1e-300);
-        for (c, p) in combined.iter_mut().zip(&psd) {
-            *c += p / med;
+        for (c, p) in combined.iter_mut().zip(&mut psd) {
+            *p /= med;
+            *c += *p;
         }
+        spectra.push(psd);
         k_segments = k_segments.min(k);
         used += 1;
     }
@@ -360,6 +367,7 @@ pub fn occupied(streams: &[&[Complex<f64>]], fs: f64, passband_hz: f64) -> Vec<S
                     low_hz: lo - bin,
                     high_hz: hi + bin,
                     peak_db: 10. * pk.log10(),
+                    receiver_snr_db: vec![],
                 });
                 None
             }
@@ -371,9 +379,27 @@ pub fn occupied(streams: &[&[Complex<f64>]], fs: f64, passband_hz: f64) -> Vec<S
             low_hz: lo - bin,
             high_hz: hi + bin,
             peak_db: 10. * pk.log10(),
+            receiver_snr_db: vec![],
         });
     }
     segments.retain(|s| s.high_hz - s.low_hz >= 3. * bin);
+    for seg in &mut segments {
+        let bins: Vec<_> = order
+            .iter()
+            .copied()
+            .filter(|&i| (seg.low_hz..=seg.high_hz).contains(&freq(i)))
+            .collect();
+        seg.receiver_snr_db = spectra
+            .iter()
+            .map(|p| {
+                if p.is_empty() {
+                    return None;
+                }
+                let excess = bins.iter().map(|&i| p[i]).sum::<f64>() / bins.len() as f64 - 1.;
+                (excess > 0.).then(|| 10. * excess.log10())
+            })
+            .collect();
+    }
     segments
 }
 

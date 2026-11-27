@@ -8,7 +8,9 @@ use std::{collections::HashSet, fs, path::Path};
 pub const MAX_RECEIVERS: usize = 12;
 
 pub fn checksum(path: &Path) -> Result<String> {
-    Ok(format!("{:x}", Sha256::digest(fs::read(path)?)))
+    let mut hash = Sha256::new();
+    std::io::copy(&mut fs::File::open(path)?, &mut hash)?;
+    Ok(format!("{:x}", hash.finalize()))
 }
 pub fn valid_position(p: Point) -> bool {
     p.lat.is_finite() && p.lon.is_finite() && p.lat.abs() <= 90. && p.lon.abs() <= 180.
@@ -24,7 +26,7 @@ pub fn validate_manifest(m: &Manifest) -> Result<()> {
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
             && m.frequency_hz > 0.
-            && m.frequency_hz <= 30e6,
+            && m.frequency_hz <= 6e9,
         "Invalid manifest/frequency"
     );
     ensure!(
@@ -47,7 +49,13 @@ pub fn validate_manifest(m: &Manifest) -> Result<()> {
             && m.kind == "public_beacon")
             || (m.capture_profile.as_deref() == Some(crate::ft8_tdoa::PROFILE)
                 && m.kind == "amateur_digital"));
-    let minimum_receivers = if single_receiver_ok { 1 } else { 3 };
+    let minimum_receivers = if single_receiver_ok {
+        1
+    } else if m.capture_profile.as_deref() == Some(crate::channel::PROFILE) {
+        2
+    } else {
+        3
+    };
     ensure!(
         (minimum_receivers..=MAX_RECEIVERS).contains(&m.receivers.len()),
         "Invalid receiver count for this capture profile"

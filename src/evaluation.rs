@@ -218,6 +218,7 @@ mod tests {
         e.mode = "live".into();
         e.frequency_hz = ibp::CHANNELS[0].1 as f64;
         e.reference = Some(VerifiedReference {
+            node_utc: None,
             profile: ibp::PROFILE.into(),
             cw: vec![],
             three_receivers: None,
@@ -255,53 +256,105 @@ mod tests {
 
 /// Worldwide summary for a UTC interval: one row per profile and band (or channel), with the
 /// post-hoc accuracy against the hold-out reference where one exists (DCF77, IBP, FT8 grid).
-pub fn summary(results: &[Emission]) -> Vec<Value> {
+pub fn summary(
+    db: &meridian_tdoa::db::Db,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+) -> anyhow::Result<Vec<Value>> {
+    use meridian_tdoa::calibration::{contains, mahalanobis2};
     use std::collections::BTreeMap;
-    let mut groups: BTreeMap<(String, String), Vec<&Emission>> = BTreeMap::new();
-    for e in results
-        .iter()
-        .filter(|e| e.mode == "live" && !e.fault_injected)
-    {
-        let profile = e
-            .reference
-            .as_ref()
-            .map_or("unverified".to_string(), |r| r.profile.clone());
-        let band = meridian_tdoa::bands::name(e.frequency_hz).map_or_else(
-            || {
-                if e.frequency_hz < 300e3 {
-                    format!("LF {:.1} kHz", e.frequency_hz / 1e3)
-                } else {
-                    format!("{:.3} MHz", e.frequency_hz / 1e6)
-                }
-            },
-            str::to_owned,
-        );
-        groups.entry((profile, band)).or_default().push(e);
+    #[derive(Default)]
+    struct Totals {
+        observations: usize,
+        heard: usize,
+        timed: usize,
+        fixes: usize,
+        calls: HashSet<String>,
+        errors: Vec<f64>,
+        latency: Vec<f64>,
+        inside95: usize,
+        inside68: usize,
+        with_covariance: usize,
+        latest: String,
     }
-    groups
-        .into_iter()
-        .map(|((profile, band), es)| {
-            let heard = es.iter().filter(|e| e.detected).count();
-            let timed = es.iter().filter(|e| e.receivers.iter().filter(|r| r.confirmed).count() >= 2).count();
-            let located: Vec<_> = es.iter().filter(|e| e.estimate.is_some()).collect();
-            let mut errors = vec![];
-            let mut covered = 0;
-            for e in &located {
-                if let (Some(r), Some(est)) = (reference(e), &e.estimate) {
-                    errors.push(geo::distance(est.center, r.point));
-                    covered += meridian_tdoa::calibration::contains(&est.polygon, r.point) as usize;
+    let mut groups = BTreeMap::<(String, String), Totals>::new();
+    db.visit_live(
+        start.timestamp_millis(),
+        end.timestamp_millis(),
+        |e, published| {
+            let profile = e.reference.as_ref().map(|r| r.profile.as_str()).unwrap_or(
+                if e.status == "no_verified_beacon" {
+                    ibp::PROFILE
+                } else {
+                    "unverified"
+                },
+            );
+            let band = meridian_tdoa::bands::name(e.frequency_hz).unwrap_or(match e.frequency_hz {
+                f if f < 300e3 => "LF",
+                f if f < 3e6 => "MF",
+                f if f < 30e6 => "HF",
+                f if f < 300e6 => "VHF",
+                f if f < 3e9 => "UHF",
+                _ => "SHF",
+            });
+            let g = groups
+                .entry((profile.to_owned(), band.to_owned()))
+                .or_default();
+            g.observations += 1;
+            g.heard += e.detected as usize;
+            g.timed += (e.receivers.iter().filter(|r| r.confirmed).count() >= 2) as usize;
+            if let Some(id) = &e.identity {
+                g.calls.insert(id.callsign.clone());
+            }
+            if g.latest < e.start_utc {
+                g.latest.clone_from(&e.start_utc);
+            }
+            let Some(est) = &e.estimate else {
+                return;
+            };
+            g.fixes += 1;
+            // For legacy node reports the association time is the only UTC time available.
+            // A network latency measured from that time would omit transport and processing.
+            if e.has_rf_utc() {
+                if let (Some(seen), Some(rf)) = (published, meridian_tdoa::db::millis(&e.start_utc))
+                {
+                    if seen >= rf {
+                        g.latency.push((seen - rf) as f64 / 1000.);
+                    }
                 }
             }
-            errors.sort_by(f64::total_cmp);
-            let n = errors.len();
-            let median = (n > 0).then(|| (errors[(n - 1) / 2] + errors[n / 2]) / 2.);
-            let p90 = (n > 0).then(|| errors[(n * 9).div_ceil(10) - 1]);
-            let distinct: std::collections::HashSet<_> = es.iter().filter_map(|e| e.identity.as_ref().map(|i| i.callsign.as_str())).collect();
-            json!({"profile":profile,"band":band,"observations":es.len(),"heard":heard,"timed_two_plus":timed,
-                "located":located.len(),"distinct_identities":distinct.len(),"evaluated":n,
-                "median_error_km":median,"p90_error_km":p90,
-                "contour_coverage":(n > 0).then(|| covered as f64 / n as f64),
-                "latest_utc":es.iter().map(|e| e.start_utc.as_str()).max()})
-        })
-        .collect()
+            if let Some(r) = reference(&e) {
+                g.errors.push(geo::distance(est.center, r.point));
+                g.inside95 += contains(&est.polygon, r.point) as usize;
+                if let Some(d2) = mahalanobis2(est, r.point) {
+                    g.with_covariance += 1;
+                    // Exactly 68% probability mass for a 2-dimensional Gaussian ellipse.
+                    g.inside68 += (d2 <= -2. * 0.32_f64.ln()) as usize;
+                }
+            }
+        },
+    )?;
+    let hours = (end - start).num_milliseconds() as f64 / 3_600_000.;
+    let mut rows = Vec::new();
+    for ((profile, band), mut g) in groups {
+        let quantiles = |v: &mut Vec<f64>| {
+            v.sort_by(f64::total_cmp);
+            let n = v.len();
+            (
+                (n > 0).then(|| (v[(n - 1) / 2] + v[n / 2]) / 2.),
+                (n > 0).then(|| v[(9 * n).div_ceil(10) - 1]),
+            )
+        };
+        let (median, p90) = quantiles(&mut g.errors);
+        let (lat50, lat90) = quantiles(&mut g.latency);
+        let coverage = |a: usize, n: usize| (n > 0).then(|| a as f64 / n as f64);
+        rows.push(json!({"profile":profile,"band":band,"observations":g.observations,"heard":g.heard,
+            "timed_two_plus":g.timed,"located":g.fixes,"fixes_per_hour":g.fixes as f64/hours,
+            "distinct_identities":g.calls.len(),"evaluated":g.errors.len(),"median_error_km":median,"p90_error_km":p90,
+            "contour_coverage":coverage(g.inside95,g.errors.len()),"ellipse_68_evaluated":g.with_covariance,
+            "ellipse_68_coverage":coverage(g.inside68,g.with_covariance),
+            "publication_latency_count":g.latency.len(),"median_publication_latency_s":lat50,
+            "p90_publication_latency_s":lat90,"latest_utc":g.latest}));
+    }
+    Ok(rows)
 }

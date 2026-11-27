@@ -28,7 +28,7 @@ def main():
     attempted = set()
     attempt_lock = threading.Lock()
     original = socket.create_connection
-    proxy = os.environ.get('HTTP_PROXY') or os.environ.get('http_proxy')
+    proxy = os.environ.get('HTTP_PROXY') or os.environ.get('http_proxy') or os.environ.get('ALL_PROXY') or os.environ.get('all_proxy')
 
     def connect(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_address=None, **kwargs):
         host, port = address
@@ -64,6 +64,8 @@ def main():
         for key in ('ip_limit', 'too_busy', 'badp', 'down', 'redirect', 'inactivity_timeout'):
             if (' %s:' % key) in text or text.rstrip().endswith(' ' + key):
                 rest = text.split(key, 1)[1].strip(': ').split()
+                if key == 'badp' and rest[:1] == ['0']:
+                    continue
                 sys.stderr.write('MERIDIAN-REFUSAL %s %s\n' % (key, rest[0] if rest else ''))
                 sys.stderr.flush()
         return debug(msg, *a, **kw)

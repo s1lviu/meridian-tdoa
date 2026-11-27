@@ -11,6 +11,7 @@ pub mod geo;
 pub mod ibp;
 pub mod iq;
 pub mod kiwi;
+mod kiwi_stream;
 pub mod model;
 pub mod pipeline;
 pub mod protocol;

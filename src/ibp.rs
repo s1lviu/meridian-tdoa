@@ -270,6 +270,7 @@ pub fn analyze(path: &Path) -> Result<Analysis> {
                         e.reason = None;
                     }
                     e.reference = Some(VerifiedReference {
+                        node_utc: None,
                         profile: PROFILE.into(),
                         three_receivers: protocol::comparison(&e),
                         cw: proof.clone(),

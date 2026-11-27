@@ -54,8 +54,8 @@ pub fn parse(bytes: &[u8]) -> Result<Track> {
                 );
                 fs = u32le(&b[4..]) as f64;
                 ensure!(
-                    (11990.0..=12010.0).contains(&fs),
-                    "This adapter accepts only approximately 12 kHz Kiwi IQ; other rates require dedicated antialias filtering"
+                    (11990.0..=12010.0).contains(&fs) || (19990.0..=20270.0).contains(&fs),
+                    "Unsupported Kiwi IQ sample rate {fs} Hz"
                 );
             }
             b"kiwi" => {
@@ -156,11 +156,22 @@ impl Track {
     /// (16 taps per side, β = 7.86 ≈ 80 dB; passband ±5 kHz at 12 kHz). Time between block
     /// timestamps is linear, as recorded by the receiver.
     pub fn resample(&self, start: f64, fs: f64, n: usize) -> Vec<Complex<f64>> {
-        let flat: Vec<Complex<f64>> = self
+        let mut flat: Vec<Complex<f64>> = self
             .blocks
             .iter()
             .flat_map(|b| b.iq.iter().copied())
             .collect();
+        if self.actual_fs > fs * 1.01 {
+            // Remove everything above output Nyquist before sampling the GNSS time grid.
+            // Preserve the 10 kHz acquisition passband at the 12 kHz analysis rate.
+            flat = crate::dsp::bandpass(
+                &flat,
+                self.actual_fs,
+                -fs * 5. / 12.,
+                fs * 5. / 12.,
+                fs / 12.,
+            );
+        }
         let mut offsets = Vec::with_capacity(self.blocks.len());
         let mut acc = 0usize;
         for b in &self.blocks {
@@ -187,6 +198,33 @@ impl Track {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn wide_kiwi_rate_preserves_timing_and_suppresses_aliases() {
+        let rate = 20_250.;
+        let tone = |hz: f64, t: f64| Complex::from_polar(1., std::f64::consts::TAU * hz * t);
+        let blocks = (0..81)
+            .map(|b| Block {
+                t: b as f64 * 250. / rate,
+                age: 0,
+                iq: (0..250)
+                    .map(|i| {
+                        let t = (b * 250 + i) as f64 / rate;
+                        tone(3500., t) + tone(8000., t)
+                    })
+                    .collect(),
+            })
+            .collect();
+        let track = Track {
+            blocks,
+            nominal_fs: rate,
+            actual_fs: rate,
+            sync_error: None,
+            max_age: 0,
+        };
+        for (i, sample) in track.resample(0.1, 12000., 2000).into_iter().enumerate() {
+            assert!((sample - tone(3500., 0.1 + i as f64 / 12000.)).norm() < 0.003);
+        }
+    }
     #[test]
     fn rejects_audio_and_truncation() {
         assert!(parse(b"not a wav").is_err());

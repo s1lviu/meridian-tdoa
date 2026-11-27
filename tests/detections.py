@@ -49,12 +49,14 @@ def main():
     reference = (44.43, 26.02)
     config["reference_emitters"] = [{"signal_prefix": "ref-", "position": {"lat": reference[0], "lon": reference[1]},
                                      "evidence": {"url": "https://example.org/simulated", "note": "simulated reference"}}]
-    with open(os.path.join(work, "config.json"), "w") as f:
-        json.dump(config, f)
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
-    env = dict(os.environ, MERIDIAN_CONFIG="config.json", PORT=str(port), MERIDIAN_DIRECTORY_OFFLINE="1")
+    config["listen"] = f"127.0.0.1:{port}"
+    with open(os.path.join(work, "config.json"), "w") as f:
+        json.dump(config, f)
+    env = dict(os.environ, MERIDIAN_CONFIG="config.json", MERIDIAN_DIRECTORY_OFFLINE="1")
+    env.pop("PORT", None)
     server = subprocess.Popen([binary], cwd=work, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     base = f"http://127.0.0.1:{port}"
     try:

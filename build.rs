@@ -27,4 +27,25 @@ fn main() {
     }
     println!("cargo:rerun-if-changed=build.rs");
     build.compile("ft8");
+    #[cfg(feature = "soapy")]
+    {
+        let lib = pkg_config::Config::new()
+            .atleast_version("0.8")
+            .cargo_metadata(false)
+            .probe("SoapySDR")
+            .expect("The soapy feature requires the SoapySDR development library");
+        if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+            for path in &lib.link_paths {
+                println!("cargo:rustc-link-arg=-Wl,-rpath,{}", path.display());
+            }
+        }
+        println!("cargo:rerun-if-changed=src/bin/soapy/receive.cpp");
+        cc::Build::new()
+            .cpp(true)
+            .std("c++17")
+            .includes(lib.include_paths)
+            .file("src/bin/soapy/receive.cpp")
+            .compile("meridian_soapy");
+        pkg_config::Config::new().probe("SoapySDR").unwrap();
+    }
 }

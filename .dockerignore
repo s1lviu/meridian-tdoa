@@ -14,3 +14,7 @@ evidence
 *.tar.gz
 !third_party/*.tar.gz
 __pycache__
+
+.codegraph
+data/meridian.sqlite*
+data/inbox*

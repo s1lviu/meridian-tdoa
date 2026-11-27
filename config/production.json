@@ -10,7 +10,9 @@
       "ft8-30m",
       "dcf77-channel",
       "ft8-17m",
-      "ft8-15m"
+      "ft8-15m",
+      "am-648khz",
+      "am-5mhz"
     ],
     "interval_s": 60,
     "directory_receivers": 12,
@@ -446,6 +448,44 @@
       "duration_s": 30,
       "verification": "correlated_v1",
       "min_spacing_km": 150
+    },
+    {
+      "id": "am-648khz",
+      "kind": "monitored_channel",
+      "frequency_hz": 648000,
+      "eligibility_evidence": {
+        "url": "https://www.radiocaroline.co.uk/manx_info.html",
+        "note": "Radio Caroline lists its public AM service on 648 kHz. Correlate the received modulation. Other stations may share the channel."
+      },
+      "source_ids": [
+        "f82e0c018380",
+        "00aafd2d3947",
+        "147f0fdf7a94",
+        "f82e0c136d0e",
+        "0cb2b7d6cd86"
+      ],
+      "duration_s": 30,
+      "verification": "correlated_v1",
+      "min_spacing_km": 150
+    },
+    {
+      "id": "am-5mhz",
+      "kind": "monitored_channel",
+      "frequency_hz": 5000000,
+      "eligibility_evidence": {
+        "url": "https://www.nist.gov/pml/time-and-frequency-division/time-distribution/radio-station-wwv",
+        "note": "NIST publishes a double-sideband AM time broadcast on 5 MHz. Stations share this frequency. Channel occupancy does not identify a transmitter."
+      },
+      "source_ids": [
+        "f82e0c018380",
+        "00aafd2d3947",
+        "147f0fdf7a94",
+        "f82e0c136d0e",
+        "0cb2b7d6cd86"
+      ],
+      "duration_s": 30,
+      "verification": "correlated_v1",
+      "min_spacing_km": 600
     }
   ],
   "gps_offset_valid_until_utc": "2027-01-01T00:00:00Z"

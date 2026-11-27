@@ -22,6 +22,8 @@ pub struct Track {
     pub rejected: usize,
     pub first_utc: String,
     pub last_utc: String,
+    #[serde(default)]
+    pub rf_utc: bool,
     /// Most recent contributing observation ids (newest last, at most 50).
     pub observations: Vec<String>,
 }
@@ -99,15 +101,15 @@ fn intersect(x2: (f64, f64), p1: [f64; 3], p2: [f64; 3]) -> Option<((f64, f64), 
     }
 }
 
-/// Registry key: the decoded callsign, the reference profile (e.g. DCF77), or the channel.
+/// Only a decoded identity or a verified reference can join fixes across emissions.
+/// Co-channel transmitters can be active at the same frequency in different places.
 pub fn key(e: &Emission) -> String {
     if let Some(i) = &e.identity {
         return format!("call:{}", i.callsign);
     }
     match e.reference.as_ref().map(|r| r.profile.as_str()) {
         Some(crate::protocol::PROFILE) => "ref:DCF77".into(),
-        Some(p) => format!("{p}:{:.0}", e.frequency_hz),
-        None => format!("channel:{:.0}", (e.frequency_hz / 100.).round() * 100.),
+        _ => format!("obs:{}", e.id),
     }
 }
 
@@ -155,6 +157,7 @@ pub fn update(track: &mut Option<Track>, e: &Emission) -> bool {
                 rejected: 0,
                 first_utc: e.start_utc.clone(),
                 last_utc: e.start_utc.clone(),
+                rf_utc: e.has_rf_utc(),
                 observations: vec![e.id.clone()],
             });
             true
@@ -180,7 +183,9 @@ pub fn update(track: &mut Option<Track>, e: &Emission) -> bool {
             t.covariance_km2 = p;
             t.fixes += 1;
             t.frequency_hz = e.frequency_hz;
-            if e.start_utc > t.last_utc {
+            t.band = crate::bands::name(e.frequency_hz).map(str::to_owned);
+            if e.start_utc >= t.last_utc {
+                t.rf_utc = e.has_rf_utc();
                 t.last_utc = e.start_utc.clone();
             }
             t.observations.push(e.id.clone());

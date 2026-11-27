@@ -6,6 +6,7 @@
 use anyhow::{Result, ensure};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::fs::{File, TryLockError};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,7 +78,10 @@ fn wavs(dir: &Path) -> Vec<(PathBuf, u64)> {
 
 fn delete_wavs(dir: &Path, report: &mut Report) -> Result<()> {
     for (p, len) in wavs(dir) {
-        std::fs::remove_file(&p)?;
+        match std::fs::remove_file(&p) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            result => result?,
+        }
         report.iq_files_deleted += 1;
         report.iq_bytes_deleted += len;
     }
@@ -113,7 +117,7 @@ pub fn sweep(captures: &Path, policy: &Policy, now: DateTime<Utc>) -> Result<Rep
     };
     for entry in entries.flatten() {
         let dir = entry.path();
-        if !dir.is_dir() {
+        if !dir.is_dir() || active_bytes(&dir)? > 0 {
             continue;
         }
         let Some(born) = created(&dir) else { continue };
@@ -152,11 +156,54 @@ fn bytes_in(path: &Path) -> u64 {
         .flatten()
         .flatten()
         .map(|e| match e.metadata() {
-            Ok(m) if m.is_dir() => bytes_in(&e.path()),
+            Ok(m) if m.is_dir() => {
+                bytes_in(&e.path()).max(active_bytes(&e.path()).unwrap_or(u64::MAX))
+            }
             Ok(m) => m.len(),
             Err(_) => 0,
         })
-        .sum()
+        .fold(0, u64::saturating_add)
+}
+
+fn active_bytes(dir: &Path) -> Result<u64> {
+    let path = dir.join(".reserved-bytes");
+    let lock = match File::open(&path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(e.into()),
+    };
+    match lock.try_lock() {
+        Ok(()) => Ok(0), // finished or interrupted process
+        Err(TryLockError::WouldBlock) => Ok(std::fs::read_to_string(path)?.parse()?),
+        Err(TryLockError::Error(e)) => Err(e.into()),
+    }
+}
+
+/// Serializes admissions across server and CLI processes. The per-capture lock
+/// keeps the outstanding reservation visible while its IQ is being written.
+pub fn reserve(captures: &Path, id: &str, bytes: u64) -> Result<(PathBuf, File)> {
+    use std::io::Write;
+    std::fs::create_dir_all(captures)?;
+    let admission = File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(captures.join(".capture-window.lock"))?;
+    admission.lock()?;
+    let quota = std::env::var("MERIDIAN_CAPTURE_QUOTA_BYTES")
+        .ok()
+        .map(|s| s.parse::<u64>())
+        .transpose()?
+        .unwrap_or(2 * 1024 * 1024 * 1024);
+    enforce_quota(captures, quota, bytes)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::StorageFull, e.to_string()))?;
+    let dir = captures.join(id);
+    std::fs::create_dir(&dir)?;
+    let mut reservation = File::create_new(dir.join(".reserved-bytes"))?;
+    write!(reservation, "{bytes}")?;
+    reservation.lock()?;
+    Ok((dir, reservation))
 }
 
 /// Make room for `reserve` bytes under `quota` by evicting the oldest IQ first.
@@ -167,7 +214,7 @@ pub fn enforce_quota(captures: &Path, quota: u64, reserve: u64) -> Result<Report
     );
     let mut report = Report::default();
     let mut used = bytes_in(captures);
-    if used + reserve <= quota {
+    if used.saturating_add(reserve) <= quota {
         return Ok(report);
     }
     let mut dirs: Vec<_> = std::fs::read_dir(captures)
@@ -176,11 +223,17 @@ pub fn enforce_quota(captures: &Path, quota: u64, reserve: u64) -> Result<Report
         .flatten()
         .map(|e| e.path())
         .filter(|p| p.is_dir())
-        .filter_map(|p| Some((created(&p)?, p)))
+        .filter_map(|p| {
+            let born = created(&p)?;
+            // A fresh, as-yet unprocessed capture may still be needed by the solver.
+            (active_bytes(&p).ok()? == 0
+                && (p.join(MARKER).is_file() || Utc::now() - born >= chrono::Duration::hours(1)))
+            .then_some((born, p))
+        })
         .collect();
     dirs.sort();
     for (_, dir) in dirs {
-        if used + reserve <= quota {
+        if used.saturating_add(reserve) <= quota {
             break;
         }
         let before = report.iq_bytes_deleted;
@@ -188,7 +241,7 @@ pub fn enforce_quota(captures: &Path, quota: u64, reserve: u64) -> Result<Report
         used = used.saturating_sub(report.iq_bytes_deleted - before);
     }
     ensure!(
-        used + reserve <= quota,
+        used.saturating_add(reserve) <= quota,
         "IQ quota exhausted by files that are not captures; free space under data/captures"
     );
     Ok(report)
@@ -197,6 +250,28 @@ pub fn enforce_quota(captures: &Path, quota: u64, reserve: u64) -> Result<Report
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn active_reservation_cannot_be_evicted_or_double_booked() {
+        let root = tempfile::tempdir().unwrap();
+        let (dir, reservation) = reserve(root.path(), "active", 8192).unwrap();
+        std::fs::write(dir.join("iq.sigmf-data"), [0; 2048]).unwrap();
+        mark(&dir, false).unwrap();
+        assert_eq!(
+            sweep(root.path(), &Policy::default(), Utc::now())
+                .unwrap()
+                .iq_bytes_deleted,
+            0
+        );
+        assert!(enforce_quota(root.path(), 10000, 3000).is_err());
+        drop(reservation);
+        assert_eq!(
+            sweep(root.path(), &Policy::default(), Utc::now())
+                .unwrap()
+                .iq_bytes_deleted,
+            2048
+        );
+        assert!(enforce_quota(root.path(), 10000, 3000).is_ok());
+    }
     #[test]
     fn unverified_iq_goes_immediately_verified_iq_after_its_ttl_and_quota_evicts_oldest() {
         let root = tempfile::tempdir().unwrap();

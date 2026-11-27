@@ -4,6 +4,7 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY third_party/ft8_lib ./third_party/ft8_lib
 COPY src ./src
+COPY data/results/dcf77-20200813.json data/results/dcf77-20200813-sync-loss.json ./data/results/
 COPY web/dcf77-reference.json web/ibp-evaluation.json ./web/
 RUN --mount=type=secret,id=proxy_ca \
     --mount=type=cache,target=/usr/local/cargo/registry \

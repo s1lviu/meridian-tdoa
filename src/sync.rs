@@ -17,6 +17,10 @@ pub struct Detection {
     pub node: String,
     /// Identifies the emission across nodes (decoded content hash, slot, sequence number …).
     pub signal: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transmitter: Option<String>,
+    #[serde(default)]
+    pub free_running: bool,
     /// Arrival time in the node's clock, seconds (any epoch, consistent per node).
     pub local_s: f64,
     pub sigma_s: f64,
@@ -141,6 +145,9 @@ impl Network {
                 clock.updates = 1;
                 continue;
             }
+            if d.local_s <= clock.at_s {
+                continue;
+            }
             clock.predict(d.local_s, q);
             let (pred, sd) = clock.at(d.local_s);
             if (z - pred).abs() > 5. * (sd * sd + r).sqrt() && clock.updates >= 3 {
@@ -249,6 +256,7 @@ pub fn emission(
         spectrum: vec![],
         processed_at: chrono::Utc::now().to_rfc3339(),
         reference: Some(VerifiedReference {
+            node_utc: None,
             profile: "mlat_v1".into(),
             three_receivers: None,
             cw: vec![],
@@ -382,6 +390,8 @@ mod tests {
                 .iter()
                 .enumerate()
                 .map(|(i, (id, p))| Detection {
+                    transmitter: None,
+                    free_running: true,
                     node: id.clone(),
                     signal: signal.into(),
                     local_s: clock(i, t + geo::distance(emitter, *p) / geo::C_KM_S)

@@ -22,7 +22,10 @@ pub struct Residuals {
 
 fn quantile(v: &mut [f64], q: f64) -> f64 {
     v.sort_by(f64::total_cmp);
-    v[((v.len() - 1) as f64 * q).round() as usize]
+    if q == 0.5 {
+        return (v[(v.len() - 1) / 2] + v[v.len() / 2]) / 2.;
+    }
+    v[((v.len() as f64 * q).ceil() as usize).saturating_sub(1)]
 }
 
 /// Residuals of every accepted pair between used receivers, evaluated at `truth`.

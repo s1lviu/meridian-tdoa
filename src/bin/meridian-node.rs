@@ -5,17 +5,33 @@
 //! Every recording in DIR (`*.sigmf-meta` + `*.sigmf-data`, written by GNU Radio, UHD,
 //! SDR++, rtl_sdr converters …) that covers an FT8 sub-band is decoded locally; each decoded
 //! message is timed against its rebuilt waveform in the node's own clock and posted to
-//! `/api/detections` as `ft8-<CALL|payload>-<slot>`. Raw IQ never leaves the node. Capturing
-//! from hardware is left to the SDR's own recorder; this agent does not drive devices.
+//! `/api/detections`. The optional SoapySDR input records timestamped IQ to the same format.
 use anyhow::{Context, Result, ensure};
 use meridian_tdoa::{ft8_tdoa, sigmf};
 use std::{collections::HashSet, path::Path, time::Duration};
 
+#[cfg(feature = "soapy")]
+mod soapy;
+
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).is_some_and(|a| a == "capture") {
+        #[cfg(feature = "soapy")]
+        {
+            ensure!(
+                args.len() == 4,
+                "meridian-node capture CONFIG.json OUTPUT_DIR"
+            );
+            let meta = soapy::capture(Path::new(&args[2]), Path::new(&args[3]))?;
+            println!("{}", meta.display());
+            return Ok(());
+        }
+        #[cfg(not(feature = "soapy"))]
+        anyhow::bail!("Build meridian-node with --features soapy for hardware capture");
+    }
     ensure!(
         args.get(1).is_some_and(|a| a == "watch"),
-        "meridian-node watch DIR --server URL --node ID --token-file FILE [--once]"
+        "meridian-node watch DIR --server URL --node ID --token-file FILE [--once], or capture CONFIG.json OUTPUT_DIR"
     );
     let dir = args.get(2).context("Missing DIR")?;
     let flag = |name: &str| {
@@ -46,6 +62,7 @@ fn main() -> Result<()> {
             .filter(|p| p.to_string_lossy().ends_with(".sigmf-meta"))
             .collect();
         metas.sort();
+        let mut errors = 0;
         for meta in metas {
             let key = meta.file_name().unwrap().to_string_lossy().to_string();
             if done.contains(&key) || !sigmf::data_path(&meta).is_file() {
@@ -53,12 +70,22 @@ fn main() -> Result<()> {
             }
             match report(&client, &server, &node, &token, &meta) {
                 Ok(n) => eprintln!("{key}: {n} detection(s) posted"),
-                Err(e) => eprintln!("{key}: {e}"),
+                Err(e) => {
+                    eprintln!("{key}: {e}");
+                    errors += 1;
+                    continue;
+                }
             }
             done.insert(key.clone());
-            std::fs::write(&state, done.iter().cloned().collect::<Vec<_>>().join("\n"))?;
+            let temporary = state.with_extension("tmp");
+            std::fs::write(
+                &temporary,
+                done.iter().cloned().collect::<Vec<_>>().join("\n"),
+            )?;
+            std::fs::rename(temporary, &state)?;
         }
         if once {
+            ensure!(errors == 0, "{errors} recording(s) pending retry");
             return Ok(());
         }
         std::thread::sleep(Duration::from_secs(5));

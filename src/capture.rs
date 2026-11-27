@@ -1,4 +1,4 @@
-//! Live acquisition delegates only the documented wire protocol to pinned KiwiClient.
+//! Public KiwiSDR capture with operator preflight, quotas and GNSS-timed IQ.
 use crate::{
     geo,
     model::*,
@@ -14,7 +14,7 @@ use std::{
 };
 use tokio::process::Command;
 
-fn safe_id(id: &str) -> bool {
+pub fn safe_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() < 64
         && id
@@ -400,15 +400,15 @@ pub struct Capture {
     config: Config,
     target: Target,
     sources: Vec<LiveSource>,
+    id: String,
     directory: PathBuf,
+    _reservation: std::fs::File,
+    _receiver_locks: Vec<std::fs::File>,
 }
 
 impl Capture {
     pub fn receiver_ids(&self) -> Vec<String> {
         self.sources.iter().map(|s| s.id.clone()).collect()
-    }
-    pub fn target(&self) -> &Target {
-        &self.target
     }
 }
 
@@ -428,54 +428,96 @@ pub fn reserve_window(plans: Vec<(Config, Target)>, data_dir: &Path) -> Result<V
         authorized.push((config, target, sources));
     }
     std::fs::create_dir_all(data_dir)?;
-    // The lock covers only the quota decision; windows on disjoint receivers then run in parallel.
-    let window = std::fs::File::options()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(data_dir.join(".capture-window.lock"))?;
-    window
-        .lock()
-        .context("Could not reserve the IQ archive for this capture window")?;
-    let quota = std::env::var("MERIDIAN_CAPTURE_QUOTA_BYTES")
-        .ok()
-        .map(|s| s.parse::<u64>())
-        .transpose()?
-        .unwrap_or(2 * 1024 * 1024 * 1024);
-    // Rolling archive: evict the oldest raw IQ first; refuse only when eviction cannot make room.
-    if let Err(e) =
-        crate::retention::enforce_quota(data_dir, quota, devices.len() as u64 * 64 * 1024 * 1024)
-    {
-        return Err(std::io::Error::new(std::io::ErrorKind::StorageFull, e.to_string()).into());
+    let mut windows = Vec::new();
+    for (config, target, sources) in authorized {
+        let mut locks = Vec::new();
+        for source in &sources {
+            use sha2::{Digest, Sha256};
+            let key = Sha256::digest(source.independent_device.as_bytes());
+            let lock = std::fs::File::options()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(data_dir.join(format!(".rx-{key:x}.lock")))?;
+            lock.try_lock()
+                .with_context(|| format!("Receiver {} has an active capture", source.id))?;
+            locks.push(lock);
+        }
+        let id = format!("live-{}", uuid::Uuid::new_v4());
+        let (directory, reservation) =
+            crate::retention::reserve(data_dir, &id, sources.len() as u64 * 64 * 1024 * 1024)?;
+        windows.push(Capture {
+            config,
+            target,
+            sources,
+            id,
+            directory,
+            _reservation: reservation,
+            _receiver_locks: locks,
+        });
     }
-    // Per-receiver gaps and budgets replace a global cooldown (see `ReceiverPolicy`).
     crate::store::atomic_json(
         &data_dir.join("last-attempt.json"),
         &json!({"utc":Utc::now().to_rfc3339()}),
     )?;
-    Ok(authorized
-        .into_iter()
-        .map(|(config, target, sources)| Capture {
-            config,
-            target,
-            sources,
-            directory: data_dir.to_owned(),
-        })
-        .collect())
+    Ok(windows)
 }
 
-pub async fn capture(config: &Config, target: &Target, data_dir: &Path) -> Result<PathBuf> {
+pub async fn capture(
+    config: &Config,
+    target: &Target,
+    data_dir: &Path,
+    db: &crate::db::Db,
+) -> Result<PathBuf> {
     let mut window = reserve_window(vec![(config.clone(), target.clone())], data_dir)?;
-    record(window.pop().unwrap()).await
+    record(window.pop().unwrap(), db).await
 }
 
-pub async fn record(capture: Capture) -> Result<PathBuf> {
+fn capture_minimum(target: &Target) -> usize {
+    match target.verification.as_deref() {
+        Some(crate::ibp::PROFILE | crate::ft8_tdoa::PROFILE) => 1,
+        Some(crate::channel::PROFILE) => 2,
+        _ => 3,
+    }
+}
+
+pub async fn record(mut capture: Capture, db: &crate::db::Db) -> Result<PathBuf> {
+    let blocked = db.unusable_receivers(
+        Utc::now().timestamp_millis(),
+        &capture.config.receivers,
+        capture.target.duration_s as f64,
+    )?;
+    let skipped: Vec<_> = capture
+        .sources
+        .iter()
+        .filter(|s| blocked.contains(&s.id))
+        .map(|s| s.id.clone())
+        .collect();
+    if !skipped.is_empty() {
+        crate::store::atomic_json(
+            &capture.directory.join("capture-policy.json"),
+            &json!({"skipped_receivers":skipped,"reason":"Receiver cooldown or daily budget"}),
+        )?;
+        capture.sources.retain(|s| !blocked.contains(&s.id));
+    }
+    ensure!(
+        capture.sources.len() >= capture_minimum(&capture.target),
+        "Insufficient eligible receivers after applying cooldown and daily budgets"
+    );
+    let outcome = record_iq(&capture).await;
+    db.account(&capture.directory, capture.target.duration_s);
+    if outcome.is_err() {
+        crate::retention::mark(&capture.directory, false)?;
+    }
+    outcome
+}
+
+async fn record_iq(capture: &Capture) -> Result<PathBuf> {
     let config = &capture.config;
     let target = &capture.target;
-    let sources = capture.sources;
-    let id = format!("live-{}", uuid::Uuid::new_v4());
-    let dir = capture.directory.join(&id);
+    let id = capture.id.clone();
+    let dir = &capture.directory;
     tokio::fs::create_dir_all(dir.join("gnss_pos")).await?;
     let dir = dir.canonicalize()?;
     let client = reqwest::Client::builder()
@@ -487,7 +529,8 @@ pub async fn record(capture: Capture) -> Result<PathBuf> {
     let mut available = vec![];
     let mut probes = tokio::task::JoinSet::new();
     let center = iq_center(target);
-    for s in sources {
+    for s in &capture.sources {
+        let s = s.clone();
         let client = client.clone();
         probes.spawn(async move {
             let result = probe(&client, &s, center).await;
@@ -505,33 +548,55 @@ pub async fn record(capture: Capture) -> Result<PathBuf> {
         }
     }
     crate::store::atomic_json(&dir.join("source-checks.json"), &checks)?;
-    let ibp = target.verification.as_deref() == Some(crate::ibp::PROFILE);
+    let minimum = capture_minimum(target);
     ensure!(
-        available.len() >= if ibp { 1 } else { 3 },
+        available.len() >= minimum,
         "{}: only {} receivers pass current checks; unmonitored interval. See source-checks.json",
         id,
         available.len()
     );
     ensure!(
-        ibp || geo::geometry(&available.iter().map(|s| s.position).collect::<Vec<_>>()) > 0.02,
+        minimum < 3
+            || geo::geometry(&available.iter().map(|s| s.position).collect::<Vec<_>>()) > 0.02,
         "Insufficient geometry after current checks"
     );
-    let recorder = Path::new(&config.kiwirecorder_path)
-        .canonicalize()
-        .context("Install KiwiClient with scripts/setup_kiwiclient.sh")?;
-    let transport = Path::new("scripts/kiwi_transport.py").canonicalize()?;
-    let python = recorder_python(&config.python)?;
+    // Select a transport before contacting the SND endpoint. Neither transport retries
+    // a refused receiver. Existing HTTP CONNECT proxy deployments retain KiwiClient.
+    let proxied = ["http_proxy", "HTTP_PROXY", "ALL_PROXY", "all_proxy"]
+        .iter()
+        .any(|k| std::env::var_os(k).is_some_and(|v| !v.is_empty()));
+    let transport = match std::env::var("MERIDIAN_KIWI_TRANSPORT").ok().as_deref() {
+        None if !proxied => None,
+        Some("native") if !proxied => None,
+        Some("native") => anyhow::bail!("Use the KiwiClient transport for a configured HTTP proxy"),
+        None | Some("kiwiclient") => Some((
+            recorder_python(&config.python)?,
+            Path::new("scripts/kiwi_transport.py").canonicalize()?,
+            Path::new(&config.kiwirecorder_path)
+                .canonicalize()
+                .context("Install KiwiClient with scripts/setup_kiwiclient.sh")?,
+        )),
+        Some(other) => anyhow::bail!("Unknown Kiwi transport {other}"),
+    };
     let capture_time = Utc::now();
     let mut tasks = tokio::task::JoinSet::new();
-    // Independent child per physical receiver: one busy/disconnected receiver cannot stop the other captures.
+    // Independent task per physical receiver: one busy/disconnected receiver cannot stop the other captures.
     for source in available {
-        let python = python.clone();
-        let recorder = recorder.clone();
         let transport = transport.clone();
         let dir = dir.clone();
         let target = target.clone();
         tasks.spawn(async move {
             let result: Result<()> = async {
+                let Some((python, transport, recorder)) = transport else {
+                    return crate::kiwi_stream::record(
+                        &source.base_url,
+                        iq_center(&target),
+                        target.duration_s,
+                        &dir,
+                        &source.id,
+                    )
+                    .await;
+                };
                 let url = reqwest::Url::parse(&source.base_url)?;
                 let mut cmd = Command::new(python);
                 cmd.arg(transport)
@@ -616,7 +681,7 @@ pub async fn record(capture: Capture) -> Result<PathBuf> {
     }
     crate::store::atomic_json(&dir.join("capture-outcomes.json"), &outcomes)?;
     ensure!(
-        receivers.len() >= if ibp { 1 } else { 3 },
+        receivers.len() >= minimum,
         "{}: only {} IQ streams saved; no valid TDoA measurement. See capture-outcomes.json and receiver logs",
         id,
         receivers.len()

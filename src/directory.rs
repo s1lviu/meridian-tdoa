@@ -165,9 +165,6 @@ impl Entry {
         {
             return Some("unsupported band/converter");
         }
-        if self.mode == "rx3.wf3" {
-            return Some("20 kHz IQ mode not yet supported");
-        }
         if reqwest::Url::parse(&self.url).ok().is_none_or(|u| {
             u.scheme() != "http"
                 || u.host_str().is_none_or(|h| !public_host(h))
@@ -302,6 +299,65 @@ impl Directory {
                 }
             }
         }
+        chosen
+            .into_iter()
+            .map(|r| r.source(&self.fetched_at))
+            .collect()
+    }
+
+    /// Use recent RF evidence on this channel. Keep the strongest eligible receiver as
+    /// the anchor and require spaced, non-collinear sites before preferring signal power.
+    /// Untested sites near this network fill any remaining places.
+    pub fn network_heard(
+        &self,
+        center: f64,
+        round: usize,
+        limit: usize,
+        reserved: &std::collections::HashSet<String>,
+        spacing: f64,
+        strength: &std::collections::HashMap<String, f64>,
+    ) -> Result<Vec<crate::model::LiveSource>> {
+        let mut sites = self.anchor_order(center, reserved)?;
+        if !sites.iter().any(|r| strength.contains_key(&r.id)) {
+            return self.network_spaced(center, round, limit, reserved, spacing);
+        }
+        let point = |r: &Entry| {
+            let [lat, lon] = r.gps.unwrap();
+            crate::model::Point { lat, lon }
+        };
+        let score = |r: &Entry| strength.get(&r.id).copied().unwrap_or(f64::NEG_INFINITY);
+        sites.sort_by(|a, b| score(b).total_cmp(&score(a)).then(a.id.cmp(&b.id)));
+        let anchor = sites.remove(0);
+        sites.sort_by(|a, b| {
+            score(b).total_cmp(&score(a)).then_with(|| {
+                crate::geo::distance(point(a), point(anchor))
+                    .total_cmp(&crate::geo::distance(point(b), point(anchor)))
+            })
+        });
+        let mut chosen = vec![anchor];
+        for separation in [spacing, spacing / 2., 0.] {
+            while chosen.len() < limit {
+                let next = sites.iter().position(|r| {
+                    chosen
+                        .iter()
+                        .all(|s| crate::geo::distance(point(s), point(r)) > separation)
+                        && (chosen.len() != 2
+                            || crate::geo::geometry(&[
+                                point(chosen[0]),
+                                point(chosen[1]),
+                                point(r),
+                            ]) > 0.02)
+                });
+                let Some(i) = next else {
+                    break;
+                };
+                chosen.push(sites.remove(i));
+            }
+        }
+        ensure!(
+            chosen.len() >= 3,
+            "No non-collinear network on this channel"
+        );
         chosen
             .into_iter()
             .map(|r| r.source(&self.fetched_at))

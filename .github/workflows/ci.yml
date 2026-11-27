@@ -15,6 +15,12 @@ jobs:
       - run: cargo +1.100.0 fmt -- --check
       - run: cargo +1.100.0 test --locked
       - run: python3 tests/transport.py
+      - name: SoapySDR node and simulated GPSDO stream
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsoapysdr-dev
+          cargo +1.100.0 build --locked --features soapy --bin meridian-node
+          python3 tests/soapy.py target/debug/meridian-node
       - name: Node detections end to end (simulated nodes, real server process)
         run: cargo +1.100.0 build --locked && python3 tests/detections.py target/debug/meridian-tdoa
       - uses: actions/setup-node@v4
@@ -34,3 +40,11 @@ jobs:
           path: |
             evidence/browser-tests.json
             evidence/*.png
+
+  container:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build --tag meridian-ci .
+      - run: sh tests/container.sh meridian-ci

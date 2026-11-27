@@ -3,6 +3,9 @@
 /.venv/
 /vendor/
 /data/captures/
+/data/meridian.sqlite*
+/data/inbox/
+/data/inbox-failed/
 /data/results/live-*.json
 /data/datasets/
 .env

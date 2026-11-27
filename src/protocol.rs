@@ -175,6 +175,7 @@ pub fn reference_view(e: &Emission, capture_dir: &Path) -> Option<VerifiedRefere
         return None;
     }
     Some(VerifiedReference {
+        node_utc: None,
         profile: proof.profile,
         three_receivers: comparison(e),
         cw: vec![],

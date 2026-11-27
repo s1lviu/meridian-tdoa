@@ -124,6 +124,9 @@ pub struct ReceiverComparison {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerifiedReference {
     pub profile: String,
+    /// Own-node observation with an absolute hardware time for the RF arrival.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_utc: Option<bool>,
     pub three_receivers: Option<ReceiverComparison>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cw: Vec<crate::ibp::ReceiverEvidence>,
@@ -159,6 +162,14 @@ pub struct Emission {
     /// Receivers captured but excluded by the RF verifier before correlation.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub excluded: Vec<RejectedReceiver>,
+}
+
+impl Emission {
+    pub fn has_rf_utc(&self) -> bool {
+        self.reference
+            .as_ref()
+            .is_none_or(|r| r.profile != "mlat_v1" || r.node_utc == Some(true))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -254,6 +265,11 @@ pub struct Node {
 pub struct ReferenceEmitter {
     /// Detections whose `signal` starts with this prefix come from this emitter.
     pub signal_prefix: String,
+    /// Optional constraints for a reference identified by on-air FT8 decoding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub callsign: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frequency_hz: Option<f64>,
     pub position: Point,
     pub evidence: Evidence,
 }

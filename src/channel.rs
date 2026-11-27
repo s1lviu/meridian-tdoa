@@ -10,11 +10,11 @@ pub const PROFILE: &str = "correlated_v1";
 /// Ground wave below this frequency: fully coherent 2 s windows. Above it (ionospheric
 /// paths, Doppler of a fraction of a hertz) 0.25 s coherent sub-windows are combined.
 const SKYWAVE_HZ: f64 = 3e6;
-const MAX_SEGMENTS: usize = 8;
 
 pub struct Analysis {
     pub emissions: Vec<Emission>,
     pub segments: Vec<dsp::Segment>,
+    pub listened: Vec<String>,
 }
 
 pub fn analyze(path: &Path) -> Result<Analysis> {
@@ -82,7 +82,6 @@ pub fn analyze(path: &Path) -> Result<Analysis> {
         let refs: Vec<&[_]> = streams.iter().map(|s| s.as_slice()).collect();
         segments = dsp::occupied(&refs, fs, 4800.);
         segments.sort_by(|a, b| b.peak_db.total_cmp(&a.peak_db));
-        segments.truncate(MAX_SEGMENTS);
         let coherent_s = if center < SKYWAVE_HZ { 2.0 } else { 0.25 };
         for seg in &segments {
             let edge = ((seg.high_hz - seg.low_hz) * 0.1).max(20.);
@@ -93,7 +92,8 @@ pub fn analyze(path: &Path) -> Result<Analysis> {
             let mut rx: Vec<RxResult> = receivers
                 .iter()
                 .zip(&tracks)
-                .map(|(r, t)| RxResult {
+                .enumerate()
+                .map(|(i, (r, t))| RxResult {
                     receiver: r.clone(),
                     confirmed: false,
                     used: false,
@@ -101,7 +101,7 @@ pub fn analyze(path: &Path) -> Result<Analysis> {
                     reason: None,
                     gps_age_max_s: t.max_age,
                     sample_rate_hz: t.actual_fs,
-                    signal_score_db: seg.peak_db,
+                    signal_score_db: seg.receiver_snr_db[i].unwrap_or(0.),
                     samples: n,
                 })
                 .collect();
@@ -169,6 +169,7 @@ pub fn analyze(path: &Path) -> Result<Analysis> {
                 spectrum: vec![],
                 processed_at: Utc::now().to_rfc3339(),
                 reference: Some(VerifiedReference {
+                    node_utc: None,
                     profile: PROFILE.into(),
                     three_receivers: None,
                     cw: vec![],
@@ -198,6 +199,11 @@ pub fn analyze(path: &Path) -> Result<Analysis> {
     Ok(Analysis {
         emissions,
         segments,
+        listened: receivers
+            .into_iter()
+            .filter(|_| tracks.len() >= 2 && overlap >= 6.)
+            .map(|r| r.id)
+            .collect(),
     })
 }
 
@@ -399,7 +405,7 @@ mod ingest_tests {
                 &format!("n{i}"),
                 *p,
                 fs,
-                3.5e6,
+                145.8e6,
                 "gpsdo",
                 30.,
                 &anchors,

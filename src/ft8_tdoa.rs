@@ -194,9 +194,9 @@ pub const TOA_RATE_HZ: f64 = FS_TOA;
 
 /// Edge-node processing of one SigMF recording centred `IQ_OFFSET_HZ` above an FT8 dial:
 /// arrival-time reports of every decoded message, in the node's own clock (UTC seconds as the
-/// node's time base states them). Signal ids are `ft8-<CALL|payload hex>-<slot>`.
+/// node's time base states them). A slot and its 77-bit payload identify the emission.
 pub fn node_detections(meta: &Path, node: &str) -> Result<(f64, Vec<crate::sync::Detection>)> {
-    let r = crate::sigmf::read(meta)?;
+    let r = crate::sigmf::read_local(meta)?;
     ensure!(
         r.receiver_id == node,
         "Recording belongs to {}, not {node}",
@@ -215,12 +215,15 @@ pub fn node_detections(meta: &Path, node: &str) -> Result<(f64, Vec<crate::sync:
     while slot as f64 + 15. <= r.epoch_utc as f64 + end {
         let iq = track.resample((slot - r.epoch_utc) as f64, FS, SLOT_SAMPLES);
         for (d, a) in time_slot(&iq) {
-            let id = d.transmitter().unwrap_or_else(|| hex(&d.payload));
             out.push(crate::sync::Detection {
                 node: node.into(),
-                signal: format!("ft8-{id}-{slot}"),
+                signal: format!("ft8-{}-{slot}", hex(&d.payload)),
+                transmitter: d.transmitter(),
+                free_running: r.time_source == "free_running",
                 local_s: slot as f64 + a.lag / FS_TOA,
-                sigma_s: (a.lag_sigma / FS_TOA).max(TIMING_FLOOR_US * 1e-6),
+                sigma_s: (a.lag_sigma / FS_TOA)
+                    .max(TIMING_FLOOR_US * 1e-6)
+                    .hypot(r.time_sigma_ns * 1e-9),
             });
         }
         slot += 15;
@@ -295,8 +298,7 @@ pub fn analyze(path: &Path) -> Result<Analysis> {
         .fold(f64::NEG_INFINITY, f64::max);
     let mut emissions = vec![];
     let mut evidence_log = vec![];
-    let mut per_receiver: BTreeMap<String, usize> =
-        streams.iter().map(|s| (s.receiver.id.clone(), 0)).collect();
+    let mut per_receiver: BTreeMap<String, usize> = BTreeMap::new();
     let (mut sampled, mut decodes) = (0, 0);
     let mut planner = FftPlanner::new();
     if start.is_finite() && end - start <= 180. {
@@ -383,7 +385,11 @@ pub fn analyze(path: &Path) -> Result<Analysis> {
                         decoder_score: own.map(|d| d.score),
                         arrival: found,
                         arrival_s: timed.map(|a| a.lag / FS_TOA),
-                        sigma_us: timed.map(|a| (a.lag_sigma / FS_TOA * 1e6).max(TIMING_FLOOR_US)),
+                        sigma_us: timed.map(|a| {
+                            (a.lag_sigma / FS_TOA * 1e6)
+                                .max(TIMING_FLOOR_US)
+                                .hypot(s.receiver.timing_sigma_ns.unwrap_or(0.) / 1000.)
+                        }),
                         reason: timed.is_none().then(|| {
                             if own.is_some() {
                                 "Decoded, but the matched-filter peak is too weak to time".into()
@@ -404,7 +410,11 @@ pub fn analyze(path: &Path) -> Result<Analysis> {
                         reason: a.reason.clone(),
                         gps_age_max_s: s.iq.max_age,
                         sample_rate_hz: s.iq.actual_fs,
-                        signal_score_db: a.arrival.map_or(0., |x| x.significance()),
+                        // Excess matched-filter power over the off-peak noise reference.
+                        signal_score_db: a
+                            .arrival
+                            .filter(|x| x.noise_mean > 0. && x.peak > x.noise_mean)
+                            .map_or(0., |x| 10. * (x.peak / x.noise_mean - 1.).log10()),
                         samples: SLOT_SAMPLES,
                     })
                     .collect();
@@ -488,6 +498,7 @@ pub fn analyze(path: &Path) -> Result<Analysis> {
                     e.reason = None;
                 }
                 e.reference = Some(VerifiedReference {
+                    node_utc: None,
                     profile: PROFILE.into(),
                     three_receivers: protocol::comparison(&e),
                     cw: vec![],
@@ -825,7 +836,9 @@ mod node_tests {
                 disciplined: true,
             });
         }
-        assert!(seen.iter().all(|d| d.signal == format!("ft8-TA6CQ-{slot}")));
+        assert!(seen.iter().all(|d| d.signal == seen[0].signal
+            && d.signal.ends_with(&format!("-{slot}"))
+            && d.transmitter.as_deref() == Some("TA6CQ")));
         let disciplined = nodes.iter().map(|n| n.id.clone()).collect();
         let arrivals = crate::sync::Network::default().corrected_with(&seen, &disciplined);
         let e = crate::sync::emission(&seen[0].signal, &arrivals, &nodes, 14_074_000., Utc::now());

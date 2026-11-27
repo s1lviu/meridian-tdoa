@@ -5,9 +5,19 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
-use std::{path::Path, sync::Mutex};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+    sync::Mutex,
+};
 
 pub struct Db(Mutex<Connection>);
+
+#[derive(Default)]
+pub struct Reception {
+    pub quiet: std::collections::HashSet<String>,
+    pub strength_db: std::collections::HashMap<String, f64>,
+}
 
 /// Observation query. Time is a half-open overlap test on [start_ms, end_ms).
 #[derive(Clone, Debug)]
@@ -29,6 +39,47 @@ pub fn millis(rfc3339: &str) -> Option<i64> {
 
 fn profile(e: &Emission) -> Option<&str> {
     e.reference.as_ref().map(|r| r.profile.as_str())
+}
+
+/// Upgrade a historical reported position from its recorded receiver pairs. The
+/// archive lacks covariance. Never invent it from a radius or an evaluation reference.
+fn resolve_archived_fix(e: &mut Emission) -> bool {
+    if e.mode != "live" || e.fault_injected || !e.detected {
+        return false;
+    }
+    if !e
+        .estimate
+        .iter()
+        .chain(&e.hypotheses)
+        .any(|h| h.covariance_km2.is_none())
+    {
+        return false;
+    }
+    let used = e
+        .receivers
+        .iter()
+        .filter(|r| r.used && r.synchronized && r.confirmed)
+        .count();
+    e.estimate = None;
+    e.hypotheses.clear();
+    e.status = "undetermined".into();
+    let result = crate::geo::locate(&e.receivers, &e.pairs);
+    match result {
+        Ok(mut hypotheses) if hypotheses.len() == 1 && used >= 4 => {
+            e.estimate = hypotheses.pop();
+            e.status = "located".into();
+            e.reason = None;
+        }
+        Ok(hypotheses) if used >= 3 => {
+            e.hypotheses = hypotheses;
+            e.reason = Some(
+                "Archived pair delays yield no unique position with the current solver.".into(),
+            );
+        }
+        Err(err) => e.reason = Some(err.to_string()),
+        _ => e.reason = Some("Insufficient synchronized receiver evidence.".into()),
+    }
+    true
 }
 
 impl Db {
@@ -86,14 +137,24 @@ impl Db {
                 at_ms INTEGER NOT NULL,
                 decodes INTEGER NOT NULL);
              CREATE INDEX IF NOT EXISTS receiver_decodes_id ON receiver_decodes(band, at_ms);
+             CREATE TABLE IF NOT EXISTS receiver_listens (
+                dataset TEXT NOT NULL, id TEXT NOT NULL, band TEXT NOT NULL, at_ms INTEGER NOT NULL,
+                heard INTEGER NOT NULL, snr_db REAL, PRIMARY KEY(dataset,id));
+             CREATE INDEX IF NOT EXISTS receiver_listens_band ON receiver_listens(band,at_ms);
              CREATE TABLE IF NOT EXISTS tracks (
                 key TEXT PRIMARY KEY,
                 last_ms INTEGER NOT NULL,
                 band TEXT,
                 body TEXT NOT NULL);
-             CREATE INDEX IF NOT EXISTS tracks_last ON tracks(last_ms);",
+             CREATE INDEX IF NOT EXISTS tracks_last ON tracks(last_ms);
+             CREATE TABLE IF NOT EXISTS track_inputs (
+                id TEXT PRIMARY KEY REFERENCES emissions(id) ON DELETE CASCADE, key TEXT NOT NULL);
+             CREATE INDEX IF NOT EXISTS track_inputs_key ON track_inputs(key);
+             CREATE TABLE IF NOT EXISTS fix_publications (id TEXT PRIMARY KEY, at_ms INTEGER NOT NULL);",
         )?;
-        Ok(Db(Mutex::new(conn)))
+        let db = Db(Mutex::new(conn));
+        db.migrate_tracks()?;
+        Ok(db)
     }
 
     fn insert(tx: &rusqlite::Transaction, e: &Emission) -> Result<()> {
@@ -122,29 +183,107 @@ impl Db {
     }
 
     pub fn put_emissions(&self, es: &[Emission]) -> Result<()> {
-        let mut conn = self.0.lock().unwrap();
-        let tx = conn.transaction()?;
-        for e in es {
-            Self::insert(&tx, e)?;
-        }
-        tx.commit()?;
-        drop(conn);
-        self.fold_tracks(es)?;
-        Ok(())
+        self.write_observations(None, es, true).map(|_| ())
     }
 
     /// Atomically replace every observation of one capture (a multi-slot bundle is never half-published).
     pub fn replace_dataset(&self, dataset_id: &str, es: &[Emission]) -> Result<()> {
+        self.write_observations(Some(dataset_id), es, true)
+            .map(|_| ())
+    }
+
+    pub fn import_observations(&self, mut es: Vec<Emission>) -> Result<usize> {
+        for e in &mut es {
+            resolve_archived_fix(e);
+        }
+        self.write_observations(None, &es, false)
+    }
+
+    fn write_observations(
+        &self,
+        dataset: Option<&str>,
+        es: &[Emission],
+        publish: bool,
+    ) -> Result<usize> {
         let mut conn = self.0.lock().unwrap();
         let tx = conn.transaction()?;
-        tx.execute("DELETE FROM emissions WHERE dataset_id=?1", [dataset_id])?;
+        let mut written = 0;
+        let mut rebuild = BTreeSet::new();
+        if let Some(id) = dataset {
+            let mut old = tx.prepare_cached("SELECT DISTINCT key FROM track_inputs JOIN emissions USING(id) WHERE dataset_id=?1")?;
+            for key in old.query_map([id], |row| row.get::<_, String>(0))? {
+                rebuild.insert(key?);
+            }
+            tx.execute("DELETE FROM emissions WHERE dataset_id=?1", [id])?;
+        }
+        let mut append = BTreeMap::<String, Vec<&Emission>>::new();
+        let now = Utc::now().timestamp_millis();
         for e in es {
+            if !publish
+                && tx
+                    .prepare_cached("SELECT 1 FROM emissions WHERE id=?1")?
+                    .exists([&e.id])?
+            {
+                continue;
+            }
+            written += 1;
+            // An observation may be replaced independently of its original capture.
+            if let Some(key) = tx
+                .query_row("SELECT key FROM track_inputs WHERE id=?1", [&e.id], |r| {
+                    r.get(0)
+                })
+                .optional()?
+            {
+                rebuild.insert(key);
+            }
             Self::insert(&tx, e)?;
+            if let Some(key) = Self::index_track(&tx, e)? {
+                append.entry(key).or_default().push(e);
+            }
+            if publish && e.mode == "live" && !e.fault_injected && e.estimate.is_some() {
+                tx.execute(
+                    "INSERT OR IGNORE INTO fix_publications VALUES (?1,?2)",
+                    params![e.id, now],
+                )?;
+            }
+        }
+        for (key, mut batch) in append {
+            if rebuild.contains(&key) {
+                continue;
+            }
+            batch.sort_by(|a, b| a.start_utc.cmp(&b.start_utc).then(a.id.cmp(&b.id)));
+            let body: Option<String> = tx
+                .query_row("SELECT body FROM tracks WHERE key=?1", [&key], |row| {
+                    row.get(0)
+                })
+                .optional()?;
+            let mut track: Option<crate::tracks::Track> =
+                body.map(|b| serde_json::from_str(&b)).transpose()?;
+            if track
+                .as_ref()
+                .is_some_and(|t| batch[0].start_utc <= t.last_utc)
+            {
+                rebuild.insert(key);
+                continue;
+            }
+            for e in batch {
+                crate::tracks::update(&mut track, e);
+            }
+            Self::save_track(&tx, &key, track)?;
+        }
+        for key in rebuild {
+            Self::rebuild_track(&tx, &key)?;
+        }
+        if dataset.is_some() {
+            tx.execute("DELETE FROM fix_publications WHERE NOT EXISTS (SELECT 1 FROM emissions e WHERE e.id=fix_publications.id)", [])?;
+        }
+        if dataset.is_some()
+            || (written > 0 && es.iter().any(|e| e.mode == "live" && !e.fault_injected))
+        {
+            tx.execute("INSERT INTO meta VALUES ('live_revision',1) ON CONFLICT(key) DO UPDATE SET value=value+1", [])?;
         }
         tx.commit()?;
-        drop(conn);
-        self.fold_tracks(es)?;
-        Ok(())
+        Ok(written)
     }
 
     pub fn emission(&self, id: &str) -> Result<Option<Emission>> {
@@ -190,42 +329,123 @@ impl Db {
     }
 
     /// Tracks updated since `since_ms`, most recent first.
-    pub fn tracks(&self, since_ms: i64, limit: usize) -> Result<Vec<crate::tracks::Track>> {
+    pub fn tracks_in_band(
+        &self,
+        since_ms: i64,
+        low: f64,
+        high: f64,
+    ) -> Result<Vec<crate::tracks::Track>> {
         let conn = self.0.lock().unwrap();
         let mut stmt = conn.prepare_cached(
-            "SELECT body FROM tracks WHERE last_ms>=?1 ORDER BY last_ms DESC LIMIT ?2",
+            "SELECT body FROM tracks WHERE last_ms>=?1 AND json_extract(body,'$.frequency_hz')>=?2
+            AND json_extract(body,'$.frequency_hz')<?3 ORDER BY last_ms DESC,key",
         )?;
-        let rows = stmt.query_map(params![since_ms, limit as i64], |r| r.get::<_, String>(0))?;
+        let rows = stmt.query_map(params![since_ms, low, high], |r| r.get::<_, String>(0))?;
         rows.map(|b| Ok(serde_json::from_str(&b?)?)).collect()
     }
 
-    /// Fold live observations into the emitter registry, oldest first.
-    pub fn fold_tracks(&self, emissions: &[Emission]) -> Result<usize> {
-        let mut live: Vec<&Emission> = emissions
-            .iter()
-            .filter(|e| e.mode == "live" && !e.fault_injected && e.detected)
-            .collect();
-        live.sort_by(|a, b| a.start_utc.cmp(&b.start_utc));
-        let mut changed = 0;
-        for e in live {
-            let key = crate::tracks::key(e);
-            let mut track = self.track(&key)?;
-            if crate::tracks::update(&mut track, e) {
-                let t = track.unwrap();
-                let conn = self.0.lock().unwrap();
-                conn.execute(
-                    "INSERT OR REPLACE INTO tracks (key,last_ms,band,body) VALUES (?1,?2,?3,?4)",
-                    params![
-                        t.key,
-                        millis(&t.last_utc).unwrap_or(0),
-                        t.band,
-                        serde_json::to_string(&t)?
-                    ],
-                )?;
-                changed += 1;
+    fn index_track(tx: &rusqlite::Transaction, e: &Emission) -> Result<Option<String>> {
+        if e.mode != "live"
+            || e.fault_injected
+            || !e.detected
+            || !e
+                .estimate
+                .iter()
+                .chain(&e.hypotheses)
+                .any(|h| h.covariance_km2.is_some())
+        {
+            return Ok(None);
+        }
+        let key = crate::tracks::key(e);
+        tx.execute(
+            "INSERT INTO track_inputs(id,key) VALUES (?1,?2)",
+            params![e.id, key],
+        )?;
+        Ok(Some(key))
+    }
+
+    fn save_track(
+        tx: &rusqlite::Transaction,
+        key: &str,
+        track: Option<crate::tracks::Track>,
+    ) -> Result<()> {
+        if let Some(t) = track {
+            tx.execute(
+                "INSERT OR REPLACE INTO tracks(key,last_ms,band,body) VALUES (?1,?2,?3,?4)",
+                params![key, millis(&t.last_utc), t.band, serde_json::to_string(&t)?],
+            )?;
+        } else {
+            tx.execute("DELETE FROM tracks WHERE key=?1", [key])?;
+        }
+        Ok(())
+    }
+
+    fn rebuild_track(tx: &rusqlite::Transaction, key: &str) -> Result<()> {
+        let mut stmt = tx.prepare_cached(
+            "SELECT body FROM track_inputs JOIN emissions USING(id)
+            WHERE key=?1 ORDER BY start_ms,id",
+        )?;
+        let mut track = None;
+        for body in stmt.query_map([key], |r| r.get::<_, String>(0))? {
+            crate::tracks::update(&mut track, &serde_json::from_str(&body?)?);
+        }
+        Self::save_track(tx, key, track)
+    }
+
+    fn migrate_tracks(&self) -> Result<()> {
+        let mut conn = self.0.lock().unwrap();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if tx
+            .prepare("SELECT 1 FROM meta WHERE key='track_inputs_v2'")?
+            .exists([])?
+        {
+            return Ok(());
+        }
+        let ids = tx.prepare("SELECT id FROM emissions WHERE mode='live' AND fault=0 AND detected=1
+                AND (json_type(body,'$.estimate')='object' OR json_array_length(body,'$.hypotheses')>0)")?
+            .query_map([],|r| r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        tx.execute("DELETE FROM track_inputs", [])?;
+        tx.execute("DELETE FROM tracks", [])?;
+        let mut keys = BTreeSet::new();
+        for id in ids {
+            let body: String =
+                tx.query_row("SELECT body FROM emissions WHERE id=?1", [id], |r| r.get(0))?;
+            let mut e: Emission = serde_json::from_str(&body)?;
+            if resolve_archived_fix(&mut e) {
+                Self::insert(&tx, &e)?;
+            }
+            if let Some(key) = Self::index_track(&tx, &e)? {
+                keys.insert(key);
             }
         }
-        Ok(changed)
+        for key in keys {
+            Self::rebuild_track(&tx, &key)?;
+        }
+        tx.execute("INSERT INTO meta VALUES ('track_inputs_v2','1')", [])?;
+        Ok(tx.commit()?)
+    }
+
+    /// Stream a full UTC interval to the statistics calculation without loading its IQ evidence
+    /// into one large vector or silently dropping older observations at a result-count limit.
+    pub fn visit_live(
+        &self,
+        start_ms: i64,
+        end_ms: i64,
+        mut visit: impl FnMut(Emission, Option<i64>),
+    ) -> Result<()> {
+        let conn = self.0.lock().unwrap();
+        let mut stmt = conn.prepare_cached(
+            "SELECT body, at_ms FROM emissions LEFT JOIN fix_publications USING(id)
+            WHERE mode='live' AND fault=0 AND start_ms>=?1 AND start_ms<?2",
+        )?;
+        let mut rows = stmt.query([start_ms, end_ms])?;
+        while let Some(row) = rows.next()? {
+            visit(
+                serde_json::from_str(&row.get::<_, String>(0)?)?,
+                row.get(1)?,
+            );
+        }
+        Ok(())
     }
 
     pub fn has_dataset(&self, dataset_id: &str) -> Result<bool> {
@@ -252,7 +472,7 @@ impl Db {
     }
 
     /// Change marker for push notifications: (newest live start, live rows, newest track update).
-    pub fn change_marker(&self) -> Result<(Option<i64>, i64, Option<i64>)> {
+    pub fn change_marker(&self) -> Result<(Option<i64>, i64, Option<i64>, i64)> {
         let conn = self.0.lock().unwrap();
         let (a, n): (Option<i64>, i64) = conn.query_row(
             "SELECT MAX(start_ms), COUNT(*) FROM emissions WHERE mode='live' AND fault=0",
@@ -260,7 +480,8 @@ impl Db {
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
         let t: Option<i64> = conn.query_row("SELECT MAX(last_ms) FROM tracks", [], |r| r.get(0))?;
-        Ok((a, n, t))
+        let revision = conn.query_row("SELECT COALESCE((SELECT CAST(value AS INTEGER) FROM meta WHERE key='live_revision'),0)", [], |r| r.get(0))?;
+        Ok((a, n, t, revision))
     }
 
     pub fn latest_live_start(&self) -> Result<Option<i64>> {
@@ -353,39 +574,52 @@ impl Db {
         }
     }
 
-    /// Per-receiver decode counts of one FT8 capture (listen-then-measure evidence).
-    pub fn record_decodes(
+    /// One independent listen per capture, dated by its IQ even when reprocessed later.
+    pub fn record_listen(
         &self,
-        band: &str,
+        m: &crate::model::Manifest,
         counts: &[(String, usize)],
-        now_ms: i64,
+        strength: &std::collections::HashMap<&str, f64>,
     ) -> Result<()> {
-        let conn = self.0.lock().unwrap();
+        let mut conn = self.0.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM receiver_listens WHERE dataset=?1", [&m.id])?;
         for (id, n) in counts {
-            conn.execute(
-                "INSERT INTO receiver_decodes (id,band,at_ms,decodes) VALUES (?1,?2,?3,?4)",
-                params![id, band, now_ms, *n as i64],
+            tx.execute(
+                "INSERT INTO receiver_listens VALUES (?1,?2,?3,?4,?5,?6)",
+                params![
+                    m.id,
+                    id,
+                    format!("{:.0}", m.frequency_hz),
+                    millis(&m.capture_utc).context("Invalid capture UTC")?,
+                    *n as i64,
+                    strength.get(id.as_str())
+                ],
             )?;
         }
-        Ok(())
+        Ok(tx.commit()?)
     }
 
     /// Receivers that heard nothing on channel `band` in at least two captures of the last six hours.
-    pub fn deaf_receivers(
-        &self,
-        band: &str,
-        now_ms: i64,
-    ) -> Result<std::collections::HashSet<String>> {
+    pub fn reception(&self, band: &str, now_ms: i64) -> Result<Reception> {
         let conn = self.0.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id FROM receiver_decodes WHERE band=?1 AND at_ms>?2 GROUP BY id HAVING COUNT(*)>=2 AND SUM(decodes)=0",
+            "WITH recent AS (SELECT id, heard, snr_db FROM receiver_listens WHERE band=?1 AND at_ms BETWEEN ?2 AND ?3),
+             all_listens AS (SELECT * FROM recent UNION ALL SELECT id,decodes,NULL FROM receiver_decodes
+             WHERE band=?1 AND at_ms BETWEEN ?2 AND ?3 AND id NOT IN (SELECT id FROM recent))
+             SELECT id, COUNT(*)>=2 AND SUM(heard)=0, AVG(snr_db) FROM all_listens GROUP BY id",
         )?;
-        let ids = stmt
-            .query_map(params![band, now_ms - 6 * 3_600_000], |r| {
-                r.get::<_, String>(0)
-            })?
-            .collect::<rusqlite::Result<_>>()?;
-        Ok(ids)
+        let mut rows = stmt.query(params![band, now_ms - 6 * 3_600_000, now_ms])?;
+        let mut result = Reception::default();
+        while let Some(r) = rows.next()? {
+            let id: String = r.get(0)?;
+            if r.get::<_, bool>(1)? {
+                result.quiet.insert(id);
+            } else if let Some(db) = r.get(2)? {
+                result.strength_db.insert(id, db);
+            }
+        }
+        Ok(result)
     }
 
     pub fn receiver_health(&self) -> Result<Vec<Value>> {
@@ -484,13 +718,20 @@ impl Db {
     /// Delete expired rows. Negative results (nothing detected in the sampled channel) expire sooner.
     pub fn prune(&self, policy: &crate::retention::Policy, now_ms: i64) -> Result<(usize, usize)> {
         let day = 86_400_000f64;
-        let conn = self.0.lock().unwrap();
+        let mut guard = self.0.lock().unwrap();
+        let conn = guard.transaction()?;
         let mut removed = 0;
         if policy.result_days > 0. {
+            let cutoff = now_ms - (policy.result_days * day) as i64;
+            let keys: Vec<String> = conn.prepare("SELECT DISTINCT key FROM track_inputs JOIN emissions USING(id) WHERE mode='live' AND end_ms<?1")?
+                .query_map([cutoff], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
             removed += conn.execute(
                 "DELETE FROM emissions WHERE mode='live' AND end_ms<?1",
-                [now_ms - (policy.result_days * day) as i64],
+                [cutoff],
             )?;
+            for key in keys {
+                Self::rebuild_track(&conn, &key)?;
+            }
         }
         if policy.negative_result_days > 0. {
             removed += conn.execute(
@@ -502,6 +743,18 @@ impl Db {
             "DELETE FROM receiver_usage WHERE start_ms<?1",
             [now_ms - 2 * 86_400_000],
         )?;
+        for table in ["receiver_decodes", "receiver_listens"] {
+            conn.execute(
+                &format!("DELETE FROM {table} WHERE at_ms<?1"),
+                [now_ms - 6 * 3_600_000],
+            )?;
+        }
+        if removed > 0 {
+            conn.execute(
+                "DELETE FROM fix_publications WHERE id NOT IN (SELECT id FROM emissions)",
+                [],
+            )?;
+        }
         let jobs = if policy.job_days > 0. {
             conn.execute(
                 "DELETE FROM jobs WHERE status!='running' AND COALESCE(updated_ms, started_ms, 0)<?1",
@@ -510,6 +763,7 @@ impl Db {
         } else {
             0
         };
+        conn.commit()?;
         Ok((removed, jobs))
     }
 
@@ -534,15 +788,7 @@ impl Db {
                 }
             }
         }
-        let fresh: Vec<_> = {
-            let conn = self.0.lock().unwrap();
-            let mut stmt = conn.prepare_cached("SELECT 1 FROM emissions WHERE id=?1")?;
-            emissions
-                .into_iter()
-                .filter(|e| !stmt.exists([&e.id]).unwrap_or(true))
-                .collect()
-        };
-        self.put_emissions(&fresh)?;
+        let imported = self.import_observations(emissions)?;
         let mut imported_jobs = 0;
         if let Ok(dir) = std::fs::read_dir(jobs) {
             for entry in dir.flatten() {
@@ -558,13 +804,72 @@ impl Db {
                 }
             }
         }
-        Ok((fresh.len(), imported_jobs))
+        Ok((imported, imported_jobs))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn tracks_survive_replacement_and_never_merge_anonymous_transmissions_by_frequency() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("data.sqlite")).unwrap();
+        let mut a: Emission =
+            serde_json::from_str(include_str!("../data/results/dcf77-20200813.json")).unwrap();
+        a.id = "a".into();
+        a.dataset_id = "window".into();
+        a.mode = "live".into();
+        a.detected = true;
+        a.identity = None;
+        a.reference = None;
+        let mut fix = a.hypotheses.remove(0);
+        fix.covariance_km2 = Some([5., 0., 5.]);
+        a.estimate = Some(fix);
+        a.hypotheses.clear();
+        let mut b = a.clone();
+        b.id = "b".into();
+        db.replace_dataset("window", &[a.clone(), b.clone()])
+            .unwrap();
+        assert_eq!(db.tracks_in_band(0, 0., 1e6).unwrap().len(), 2);
+        db.replace_dataset("window", std::slice::from_ref(&a))
+            .unwrap();
+        assert!(db.track("obs:b").unwrap().is_none());
+        assert_eq!(db.track("obs:a").unwrap().unwrap().fixes, 1);
+        assert_eq!(db.import_observations(vec![a.clone()]).unwrap(), 0);
+        db.replace_dataset("window", &[]).unwrap();
+        assert!(db.tracks_in_band(0, 0., 1e6).unwrap().is_empty());
+        assert_eq!(db.import_observations(vec![a]).unwrap(), 1);
+        db.visit_live(0, i64::MAX, |_, published| assert!(published.is_none()))
+            .unwrap();
+    }
+
+    #[test]
+    fn listening_twice_to_one_dataset_counts_as_one_receiver_observation() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("data.sqlite")).unwrap();
+        let mut m: crate::model::Manifest =
+            serde_json::from_str(include_str!("../data/recordings/manifest.json")).unwrap();
+        let now = millis(&m.capture_utc).unwrap();
+        let channel = format!("{:.0}", m.frequency_hz);
+        let counts = vec![("weak".into(), 0), ("strong".into(), 3)];
+        let snr = std::collections::HashMap::from([("strong", 12.5)]);
+        for _ in 0..2 {
+            db.record_listen(&m, &counts, &snr).unwrap();
+        }
+        let r = db.reception(&channel, now).unwrap();
+        assert!(r.quiet.is_empty());
+        assert_eq!(r.strength_db["strong"], 12.5);
+        m.id.push_str("-next");
+        db.record_listen(&m, &counts, &snr).unwrap();
+        assert!(db.reception(&channel, now).unwrap().quiet.contains("weak"));
+        assert!(
+            db.reception(&channel, now + 7 * 3600000)
+                .unwrap()
+                .strength_db
+                .is_empty()
+        );
+    }
     #[test]
     fn stores_queries_replaces_bundles_and_prunes_negative_results_first() {
         let dir = tempfile::tempdir().unwrap();
