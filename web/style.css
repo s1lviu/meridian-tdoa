@@ -29,9 +29,6 @@ select, input[type="text"], input[type="password"], input[type="url"] { backgrou
 .brand { display: flex; align-items: center; gap: 8px; font-weight: 650; letter-spacing: .02em; }
 .brand svg { color: var(--accent); }
 .brand small { color: var(--muted); font-weight: 500; }
-.modes { display: flex; border: 1px solid var(--line); border-radius: 9px; overflow: hidden; }
-.modes button { border: 0; border-radius: 0; background: transparent; }
-.modes button[aria-selected="true"] { background: #1d3b33; color: #e7fff6; }
 .status-line { margin-left: auto; display: flex; align-items: center; gap: 14px; min-width: 0; }
 .status { color: var(--muted); font: 12px var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .next-window { font: 12px var(--mono); color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 64ch; flex: none; }
@@ -51,7 +48,6 @@ select, input[type="text"], input[type="password"], input[type="url"] { backgrou
 .map-overlay.top { top: 12px; justify-content: flex-end; }
 .map-overlay.bottom { bottom: 12px; }
 .badge { font: 600 11px var(--mono); letter-spacing: .06em; padding: 4px 8px; border-radius: 6px; background: #0f2a22; color: var(--accent); border: 1px solid #275a4a; }
-.badge.replay { background: #2b2210; color: var(--warn); border-color: #6b5222; }
 .switch { background: rgba(17, 27, 35, .9); border: 1px solid var(--line); border-radius: 8px; padding: 3px 8px; font-size: 12px; display: inline-flex; gap: 6px; align-items: center; }
 .legend { background: rgba(17, 27, 35, .9); border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; font-size: 12px; color: var(--muted); width: max-content; max-width: calc(100% - 24px); }
 .legend span { display: inline-flex; align-items: center; gap: 5px; margin-right: 8px; }
@@ -84,7 +80,6 @@ table.stats th { color: var(--muted); font-weight: 500; }
 .card table.stats th:first-child, .card table.stats td:first-child { position: sticky; left: 0; background: var(--card); box-shadow: 1px 0 0 var(--line); }
 table.stats td.note { white-space: normal; text-align: left; min-width: 18em; }
 .buttons { display: flex; gap: 8px; flex-wrap: wrap; }
-.replay p { margin: 0 0 8px; color: var(--muted); font-size: 12px; }
 
 .inspector { position: fixed; top: 64px; left: 12px; width: min(420px, calc(100vw - 24px)); max-height: calc(100vh - 140px); overflow-y: auto; z-index: 1100; background: rgba(17, 27, 35, .97); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; box-shadow: 0 12px 30px rgba(0, 0, 0, .45); }
 .inspector h3 { margin: 0; font-size: 16px; }

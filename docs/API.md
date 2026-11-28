@@ -14,12 +14,12 @@ JSON over the same origin as the map. Times are RFC 3339 UTC. Request bodies are
 | GET | `/api/emissions/{id}/evaluation` | Post-hoc distance to the hold-out reference, where one exists |
 | GET | `/api/stats` | Per profile and band, counts and fixes/h, P50/P90 errors, 68%/95% coverage, publication latency (`start`, `end`) |
 | GET | `/api/stream` | Server-sent `change` events when observations or tracks change |
-| GET | `/api/receivers/health` | Fair-use ledger: per-receiver successes, failures, block state, minutes in 24 h |
+| GET | `/api/receivers/health` | Fair-use ledger: successes, failures, block state and connection seconds in 24 h per receiver, and per KiwiSDR relay as `relay:<host>` |
 | GET | `/api/clocks` | Node clock filters (reference-emitter synchronization) |
 | GET | `/api/sources`, `/api/beacons` | Public receiver directory and exclusion reasons |
 | POST | `/api/detections` | Arrival-time reports from own nodes (node bearer token) |
 | POST | `/api/capture` | Capture a configured target now (administrator token) |
-| POST | `/api/replay` | Open or reprocess a bundled recording |
+| POST | `/api/replay` | Reprocess a bundled recording. Tests only: images ship none unless `MERIDIAN_SEED_RECORDING=1` |
 | POST | `/api/review` | Attach eligibility evidence to a manual capture (administrator token) |
 | POST | `/api/directory/refresh` | Refresh the receiver directory (administrator token) |
 | GET | `/api/jobs/{id}` | Job status |

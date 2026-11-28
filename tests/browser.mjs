@@ -1,12 +1,12 @@
-// Browser checks of the map against a real server process started here, on controlled data:
-// the bundled 2020 DCF77 recording (replay) and simulated own-node detections (live).
+// Browser checks of the live-only map against a real server process started here, on
+// controlled data: simulated own-node detections and a stubbed scheduler state.
 // Usage: CHROMIUM_PATH=… node tests/browser.mjs path/to/meridian-tdoa
 // Screenshots and the check list go to evidence/ unless MERIDIAN_EVIDENCE_DIR names another directory.
 import { chromium } from "playwright";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { cpSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { createServer } from "node:net";
 import { join, resolve } from "node:path";
@@ -18,8 +18,6 @@ mkdirSync(evidence, { recursive: true });
 const work = mkdtempSync(join(tmpdir(), "meridian-browser-"));
 symlinkSync(join(repo, "web"), join(work, "web"));
 mkdirSync(join(work, "data/results"), { recursive: true });
-cpSync(join(repo, "data/recordings"), join(work, "data/recordings"), { recursive: true });
-for (const f of ["dcf77-20200813.json", "dcf77-20200813-sync-loss.json"]) cpSync(join(repo, "data/results", f), join(work, "data/results", f));
 const nodes = { n0: [44.4, 26.1], n1: [44.55, 25.8], n2: [44.2, 25.9], n3: [44.45, 26.45], n4: [44.25, 26.3] };
 const tokens = Object.fromEntries(Object.keys(nodes).map((n) => [n, `token-${n}-${"y".repeat(24)}`]));
 const config = JSON.parse(readFileSync(join(repo, "config/app.json"), "utf8"));
@@ -57,25 +55,6 @@ try {
   const errors = [];
   page.on("pageerror", (e) => errors.push(e.message));
 
-  // Replay: the real 2020 recording has three receivers and therefore two mirror hypotheses.
-  const response = await page.goto(base + "/?replay=1", { waitUntil: "load" });
-  assert.match(response.headers()["content-security-policy"], /script-src 'self'/);
-  await page.locator("#inspector").waitFor({ state: "visible" });
-  assert.match(await page.locator("#mode-badge").innerText(), /REAL RECORDING/);
-  assert.match(await page.locator("#inspector").innerText(), /Position undetermined/);
-  assert.equal(await page.locator("#inspector .rx-row").count(), 3);
-  assert.equal(await page.locator("path.hypothesis-region").count(), 2);
-  assert.equal(await page.locator("path.fix-region").count(), 0);
-  ok("recording: two mirror hypotheses, no unique fix, three receivers listed");
-  assert.ok(await page.locator("#next-window").isHidden(), "no countdown for an archived recording");
-  assert.match(await page.locator(".credit").innerText(), /^Made by Silviu YO6SAY/);
-  await page.screenshot({ path: join(evidence, "desktop.png") });
-
-  await page.locator("#sync-loss").click();
-  await page.waitForFunction(() => document.querySelector("#inspector")?.innerText.includes("Fewer than three"));
-  assert.equal(await page.locator("path.hypothesis-region").count(), 0);
-  ok("GNSS-loss replay: receiver excluded, no region drawn");
-
   // Countdown to the next scheduled window. The test server runs no scheduler, so a stub
   // serves its state; the page must count down, ask again once a window starts, and show a pause.
   const plan = (seconds, notice = null) => ({
@@ -86,9 +65,17 @@ try {
   let schedule = plan(65);
   await page.route("**/api/monitor", (route) => route.fulfill({ json: schedule }));
 
-  // Live: five GNSS-disciplined nodes report one target; the server locates and registers it.
-  await page.locator("#mode-live").click();
+  // The map is live only: no archived recording is offered in the page or served by the API.
+  const response = await page.goto(base + "/", { waitUntil: "load" });
+  assert.match(response.headers()["content-security-policy"], /script-src 'self'/);
   await page.waitForFunction(() => document.querySelector("#stats-body")?.innerText.includes("No live observation"));
+  assert.equal(await page.locator("#mode-replay, #replay-card, #sync-loss").count(), 0);
+  assert.match(await page.locator("#mode-badge").innerText(), /^LIVE/);
+  assert.deepEqual((await (await fetch(base + "/api/info")).json()).datasets, []);
+  assert.match(await page.locator(".credit").innerText(), /^Made by Silviu YO6SAY/);
+  ok("live only: no archived recording in the page or the API");
+
+  // Live: five GNSS-disciplined nodes report one target; the server locates and registers it.
   await page.waitForFunction(() => /^Next window in 1:0\d · ft8-40m, msf-channel$/.test(document.querySelector("#next-window")?.textContent || ""));
   const left = async () => {
     const [m, s] = (await page.locator("#next-window b").innerText()).split(":").map(Number);
@@ -113,6 +100,7 @@ try {
   await page.evaluate(() => loadMonitor());
   await page.waitForFunction(() => /^Next window in 0:[45]\d/.test(document.querySelector("#next-window")?.textContent || ""));
   ok("a paused scheduler shows its notice instead of a countdown");
+  await page.screenshot({ path: join(evidence, "desktop.png") });
   const target = [44.36, 26.2];
   async function sendBeacon(signal) {
     const now = Date.now() / 1000;
@@ -155,8 +143,6 @@ try {
     assert.ok(match && Number(match[2]) >= Number(match[1]), `ordered percentiles and sample count in ${column}`);
   }
   await page.reload();
-  await page.locator("#mode-replay[aria-selected='true']").waitFor();
-  await page.locator("#mode-live").click();
   await page.waitForFunction(() => document.querySelector(".api-delay")?.textContent.endsWith(" s (2)"));
   assert.equal(await page.locator(".paint-delay").innerText(), "—");
   ok("two live fixes have P50/P90 and counts, reloading keeps only measured API latency");

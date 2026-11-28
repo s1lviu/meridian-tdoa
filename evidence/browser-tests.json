@@ -1,8 +1,7 @@
 {
- "executed_at": "2026-11-28T11:12:09.983Z",
+ "executed_at": "2026-11-28T12:06:04.932Z",
  "checks": [
-  "recording: two mirror hypotheses, no unique fix, three receivers listed",
-  "GNSS-loss replay: receiver excluded, no region drawn",
+  "live only: no archived recording in the page or the API",
   "live: countdown to the next scheduled window",
   "a started window makes the page ask for the following one",
   "a paused scheduler shows its notice instead of a countdown",

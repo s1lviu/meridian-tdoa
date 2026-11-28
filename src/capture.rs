@@ -96,11 +96,17 @@ pub fn authorize(config: &Config, target: &Target) -> Result<Vec<LiveSource>> {
             && valid_evidence(&target.eligibility_evidence),
         "Target eligibility is not documented"
     );
+    ensure!(safe_id(&target.id), "Invalid target id");
     ensure!(
-        safe_id(&target.id)
-            && (10..=120).contains(&target.duration_s)
-            && (3..=crate::pipeline::MAX_RECEIVERS).contains(&target.source_ids.len()),
-        "Invalid target configuration"
+        (10..=120).contains(&target.duration_s),
+        "A capture lasts 10–120 s; {} s configured",
+        target.duration_s
+    );
+    ensure!(
+        (3..=crate::pipeline::MAX_RECEIVERS).contains(&target.source_ids.len()),
+        "A capture needs 3–{} receivers; {} usable",
+        crate::pipeline::MAX_RECEIVERS,
+        target.source_ids.len()
     );
     ensure!(
         target.frequency_hz.is_finite() && (6000.0..=30e6).contains(&target.frequency_hz),
@@ -265,15 +271,7 @@ async fn probe(
             )?;
             let a = original.host_str().unwrap_or("");
             let b = next.host_str().unwrap_or("");
-            let kiwi_proxy = |h: &str| {
-                [
-                    ".proxy.kiwisdr.com",
-                    ".proxy2.kiwisdr.com",
-                    ".proxy3.kiwisdr.com",
-                ]
-                .iter()
-                .any(|suffix| h.ends_with(suffix))
-            };
+            let relay = |h: &str| crate::directory::relay_of_host(h).is_some();
             ensure!(
                 next.scheme() == "http"
                     && next.path() == "/status"
@@ -281,9 +279,7 @@ async fn probe(
                     && next.username().is_empty()
                     && next.password().is_none()
                     && (a == b
-                        || (kiwi_proxy(a)
-                            && kiwi_proxy(b)
-                            && a.split('.').next() == b.split('.').next())),
+                        || (relay(a) && relay(b) && a.split('.').next() == b.split('.').next())),
                 "Redirect outside the checked receiver"
             );
             url = next;
@@ -316,6 +312,10 @@ pub struct ReceiverOutcome {
     pub connected_s: f64,
     /// Minimum block requested by the receiver's own refusal, seconds.
     pub block_s: f64,
+    /// Endpoint contacted, when known: it tells whether a relay was in between.
+    pub url: Option<String>,
+    /// The host refused the TCP connection. Behind a relay, that is the relay refusing us.
+    pub connection_refused: bool,
 }
 
 /// An error with its causes, e.g. "error sending request for url (…): client error (Connect):
@@ -323,6 +323,52 @@ pub struct ReceiverOutcome {
 /// only the URL, which hid why receivers failed.
 fn describe(e: &anyhow::Error) -> String {
     format!("{e:#}")
+}
+
+/// The host did not accept the TCP connection: refused, reset or unreachable. Timeouts and
+/// name-resolution errors are not counted, so a slow network never blocks a whole relay.
+pub fn connection_refused(e: &anyhow::Error) -> bool {
+    use std::io::ErrorKind::*;
+    e.chain().any(|cause| {
+        cause.downcast_ref::<std::io::Error>().is_some_and(|io| {
+            matches!(
+                io.kind(),
+                ConnectionRefused | ConnectionReset | HostUnreachable | NetworkUnreachable
+            )
+        })
+    })
+}
+
+/// One ledger entry per KiwiSDR relay used by a capture. A relay answered if any receiver
+/// behind it did; it refused us if every receiver behind it failed at the TCP connection.
+/// Refusals back off like a receiver's, and while a relay is blocked no receiver behind it
+/// is contacted.
+pub fn relay_outcomes(outcomes: &[ReceiverOutcome]) -> Vec<ReceiverOutcome> {
+    let mut relays = std::collections::BTreeMap::<&str, (usize, usize)>::new();
+    for o in outcomes {
+        if let Some(relay) = o.url.as_deref().and_then(crate::directory::relay_of) {
+            let (answered, refused) = relays.entry(relay).or_default();
+            if o.connection_refused {
+                *refused += 1;
+            } else {
+                *answered += 1;
+            }
+        }
+    }
+    relays
+        .into_iter()
+        .map(|(relay, (answered, refused))| ReceiverOutcome {
+            id: crate::directory::relay_key(relay),
+            ok: answered > 0,
+            reason: (answered == 0).then(|| {
+                format!("Relay {relay} refused the TCP connection to {refused} receiver(s)")
+            }),
+            connected_s: 0.,
+            block_s: 0.,
+            url: None,
+            connection_refused: answered == 0,
+        })
+        .collect()
 }
 
 /// Outcomes of a capture directory: preflight errors, IQ delivered, and receiver refusals
@@ -335,26 +381,44 @@ pub fn outcomes(dir: &Path, duration_s: u64) -> Vec<ReceiverOutcome> {
             .unwrap_or_default()
     };
     let mut out = vec![];
-    for c in read("source-checks.json") {
+    let checks = read("source-checks.json");
+    let url = |id: &str| {
+        checks
+            .iter()
+            .find(|c| c["source"]["id"] == id)
+            .and_then(|c| c["source"]["base_url"].as_str())
+            .map(str::to_owned)
+    };
+    for c in &checks {
         if let Some(err) = c["error"].as_str() {
             out.push(ReceiverOutcome {
                 id: c["source"]["id"].as_str().unwrap_or_default().into(),
                 ok: false,
                 reason: Some(format!("Preflight: {err}")),
+                // /status is plain HTTP; no receiver channel is opened.
                 connected_s: 0.,
                 block_s: 0.,
+                url: c["source"]["base_url"].as_str().map(str::to_owned),
+                connection_refused: c["connection_refused"] == true,
             });
         }
     }
     for c in read("capture-outcomes.json") {
         let id = c["receiver"].as_str().unwrap_or_default().to_string();
+        // Measured from the opened session to its end. Records written before the
+        // measurement existed count a capture as its nominal duration.
+        let measured = c["connected_s"]
+            .as_f64()
+            .filter(|s| s.is_finite() && *s >= 0.);
         if c["captured"] == true {
             out.push(ReceiverOutcome {
+                url: url(&id),
                 id,
                 ok: true,
                 reason: None,
-                connected_s: duration_s as f64,
+                connected_s: measured.unwrap_or(0.).max(duration_s as f64),
                 block_s: 0.,
+                connection_refused: false,
             });
             continue;
         }
@@ -386,11 +450,13 @@ pub fn outcomes(dir: &Path, duration_s: u64) -> Vec<ReceiverOutcome> {
             None => (c["error"].as_str().unwrap_or("No IQ received").into(), 0.),
         };
         out.push(ReceiverOutcome {
+            url: url(&id),
             id,
             ok: false,
             reason: Some(reason),
-            connected_s: 0.,
+            connected_s: measured.unwrap_or(0.),
             block_s,
+            connection_refused: c["connection_refused"] == true,
         });
     }
     out
@@ -500,18 +566,21 @@ pub async fn record(mut capture: Capture, db: &crate::db::Db) -> Result<PathBuf>
         &capture.config.receivers,
         capture.target.duration_s as f64,
     )?;
+    let unusable = |s: &LiveSource| {
+        blocked.contains(&s.id) || crate::directory::behind_blocked_relay(&blocked, &s.base_url)
+    };
     let skipped: Vec<_> = capture
         .sources
         .iter()
-        .filter(|s| blocked.contains(&s.id))
+        .filter(|s| unusable(s))
         .map(|s| s.id.clone())
         .collect();
     if !skipped.is_empty() {
         crate::store::atomic_json(
             &capture.directory.join("capture-policy.json"),
-            &json!({"skipped_receivers":skipped,"reason":"Receiver cooldown or daily budget"}),
+            &json!({"skipped_receivers":skipped,"reason":"Receiver or relay cooldown, or daily budget"}),
         )?;
-        capture.sources.retain(|s| !blocked.contains(&s.id));
+        capture.sources.retain(|s| !unusable(s));
     }
     ensure!(
         capture.sources.len() >= capture_minimum(&capture.target),
@@ -556,7 +625,9 @@ async fn record_iq(capture: &Capture) -> Result<PathBuf> {
                 checks.push(json!({"source":canonical,"observation":observation}));
                 available.push(canonical);
             }
-            Err(e) => checks.push(json!({"source":s,"error":describe(&e)})),
+            Err(e) => checks.push(
+                json!({"source":s,"error":describe(&e),"connection_refused":connection_refused(&e)}),
+            ),
         }
     }
     crate::store::atomic_json(&dir.join("source-checks.json"), &checks)?;
@@ -598,9 +669,11 @@ async fn record_iq(capture: &Capture) -> Result<PathBuf> {
         let dir = dir.clone();
         let target = target.clone();
         tasks.spawn(async move {
+            // Seconds the receiver's channel was in use, successful or not: the ledger counts them.
+            let mut connected_s = 0.;
             let result: Result<()> = async {
                 let Some((python, transport, recorder)) = transport else {
-                    return crate::kiwi_stream::record(
+                    let (result, seconds) = crate::kiwi_stream::record(
                         &source.base_url,
                         iq_center(&target),
                         target.duration_s,
@@ -608,6 +681,8 @@ async fn record_iq(capture: &Capture) -> Result<PathBuf> {
                         &source.id,
                     )
                     .await;
+                    connected_s = seconds;
+                    return result;
                 };
                 let url = reqwest::Url::parse(&source.base_url)?;
                 let mut cmd = Command::new(python);
@@ -654,31 +729,37 @@ async fn record_iq(capture: &Capture) -> Result<PathBuf> {
                     .kill_on_drop(true);
                 let log = std::fs::File::create(dir.join(format!("{}.log", source.id)))?;
                 cmd.stdout(log.try_clone()?).stderr(log);
+                // KiwiClient holds the whole session: its run time bounds the channel time.
+                let started = std::time::Instant::now();
                 let status =
                     tokio::time::timeout(Duration::from_secs(target.duration_s + 20), cmd.status())
-                        .await
-                        .context("Timeout IQ")??;
+                        .await;
+                connected_s = started.elapsed().as_secs_f64();
+                let status = status.context("Timeout IQ")??;
                 ensure!(status.success(), "KiwiClient exited with an error");
                 Ok(())
             }
             .await;
-            (source, result)
+            (source, result, connected_s)
         });
     }
     let mut receivers = vec![];
     let mut outcomes = vec![];
     while let Some(result) = tasks.join_next().await {
-        let (s, status) = result?;
+        let (s, status, connected_s) = result?;
         let file = dir.join(format!("capture_{}.wav", s.id));
         if status.is_err() || !file.is_file() || std::fs::metadata(&file)?.len() < 44 {
-            outcomes.push(json!({"receiver":s.id,"captured":false,"error":status.err().map(|e|describe(&e)).unwrap_or("No IQ received".into())}));
+            let refused = status.as_ref().err().is_some_and(connection_refused);
+            outcomes.push(json!({"receiver":s.id,"captured":false,
+                "error":status.err().map(|e|describe(&e)).unwrap_or("No IQ received".into()),
+                "connection_refused":refused,"connected_s":connected_s}));
             continue;
         }
         ensure!(
             std::fs::metadata(&file)?.len() <= 64 * 1024 * 1024,
             "IQ file too large"
         );
-        outcomes.push(json!({"receiver":s.id,"captured":true}));
+        outcomes.push(json!({"receiver":s.id,"captured":true,"connected_s":connected_s}));
         receivers.push(Receiver {
             id: s.id,
             label: s.label,
@@ -731,7 +812,7 @@ async fn record_iq(capture: &Capture) -> Result<PathBuf> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[cfg(unix)]
@@ -840,7 +921,81 @@ mod tests {
             .send()
             .await
             .unwrap_err();
-        let text = describe(&err.into());
+        let err = err.into();
+        let text = describe(&err);
         assert!(text.contains("Connection refused"), "{text}");
+        assert!(connection_refused(&err), "{text}");
+        let answered = anyhow::anyhow!("GNSS unavailable during preflight");
+        assert!(!connection_refused(&answered));
+    }
+
+    /// Writes the files a capture leaves behind for the ledger: preflight checks and outcomes.
+    pub(crate) fn capture_records(dir: &Path) {
+        let source = |id: &str, url: &str| json!({"id":id,"base_url":url});
+        let refused = |id: &str, url: &str| {
+            json!({"source":source(id,url),"connection_refused":true,
+                "error":"error sending request for url: client error (Connect): tcp connect error: Connection refused (os error 111)"})
+        };
+        let checks = vec![
+            refused("a", "http://21001.proxy2.kiwisdr.com:8073/"),
+            refused("b", "http://21002.proxy2.kiwisdr.com:8073/"),
+            refused("c", "http://22001.proxy.kiwisdr.com:8073/"),
+            json!({"source":source("d","http://22002.proxy.kiwisdr.com:8073/"),
+                "error":"GNSS unavailable during preflight","connection_refused":false}),
+            json!({"source":source("e","http://198.51.100.7:8073/"),"observation":{}}),
+            json!({"source":source("f","http://198.51.100.8:8073/"),"observation":{}}),
+            json!({"source":source("g","http://198.51.100.9:8073/"),"observation":{}}),
+        ];
+        let rows = vec![
+            json!({"receiver":"e","captured":true,"connected_s":31.5}),
+            json!({"receiver":"f","captured":false,"error":"Kiwi IQ capture timed out",
+                "connection_refused":false,"connected_s":50.0}),
+            // Written before the session time was measured.
+            json!({"receiver":"g","captured":true}),
+        ];
+        std::fs::write(
+            dir.join("source-checks.json"),
+            serde_json::to_vec(&checks).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("capture-outcomes.json"),
+            serde_json::to_vec(&rows).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn channel_time_counts_failed_sessions_and_a_relay_refusing_everyone_is_one_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        capture_records(dir.path());
+        let found = outcomes(dir.path(), 30);
+        let by = |id: &str| found.iter().find(|o| o.id == id).unwrap();
+        assert_eq!(by("e").connected_s, 31.5);
+        assert_eq!(
+            by("f").connected_s,
+            50.0,
+            "a failed session still held a channel"
+        );
+        assert_eq!(by("g").connected_s, 30.0);
+        assert_eq!(by("a").connected_s, 0.0, "/status is not a channel");
+        assert!(by("a").connection_refused && !by("d").connection_refused);
+        let relays = relay_outcomes(&found);
+        assert_eq!(relays.len(), 2);
+        let proxy2 = relays
+            .iter()
+            .find(|o| o.id == "relay:proxy2.kiwisdr.com")
+            .unwrap();
+        assert!(!proxy2.ok && proxy2.connection_refused);
+        assert_eq!(
+            proxy2.reason.as_deref(),
+            Some("Relay proxy2.kiwisdr.com refused the TCP connection to 2 receiver(s)")
+        );
+        // A receiver behind the other relay answered /status, so that relay accepted us.
+        let proxy = relays
+            .iter()
+            .find(|o| o.id == "relay:proxy.kiwisdr.com")
+            .unwrap();
+        assert!(proxy.ok && proxy.reason.is_none());
     }
 }

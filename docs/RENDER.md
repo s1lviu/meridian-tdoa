@@ -8,7 +8,7 @@ Provider documentation checked on 27–28 November 2026. This project uses a **D
 
 1. Use the README's **Deploy to Render** button, or choose **New → Blueprint** in Render and connect `s1lviu/meridian-tdoa` (or your fork).
 2. Select `render.yaml`; review that the service is **Free**, then create it.
-3. Wait for the build and open the URL Render assigns. `/api/ready` should return `status: ready`. Open `/?replay=1` for the bundled real recording.
+3. Wait for the build and open the URL Render assigns. `/api/ready` should return `status: ready`.
 4. Find the generated `MERIDIAN_ADMIN_TOKEN` in the service's Environment settings. Enter it in the application only when requesting capture or reprocessing. Never commit it or place it in a URL.
 
 The configuration uses port 3000 on `0.0.0.0` and `/api/ready`. It omits `maxShutdownDelaySeconds` because Render Free rejects custom shutdown delays; Render's documented default is 30 seconds. A capture still running at shutdown can be interrupted. Each commit on the linked branch (`main`) deploys automatically once all of its GitHub checks pass (`autoDeployTrigger: checksPass`); a commit with a failed check, or with no checks, is not deployed. A commit that changes this Blueprint is also applied by Blueprint sync, which redeploys the modified service. Every deploy restarts the service and can interrupt a running capture.

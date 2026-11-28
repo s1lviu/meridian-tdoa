@@ -39,13 +39,13 @@ Build with Rust 1.100 and a C compiler. Direct KiwiSDR capture uses the native R
 MERIDIAN_CONFIG=config/production.json cargo run --release --locked
 ```
 
-Open [localhost:3000](http://localhost:3000/). The production profile monitors DCF77, MSF, two public AM channels (648 kHz and 5 MHz) and five FT8 bands, choosing receivers from the public directory. The bundled 2020 DCF77 recording opens with [`/?replay=1`](http://localhost:3000/?replay=1) and needs no network.
+Open [localhost:3000](http://localhost:3000/). The production profile monitors DCF77, MSF, two public AM channels (648 kHz and 5 MHz) and five FT8 bands, choosing receivers from the public directory. The map shows live data only; the bundled 2020 DCF77 recording is a test fixture.
 
 With Docker:
 
 ```sh
 docker build -t meridian-tdoa:0.3.0 .
-docker run --rm --init -p 3000:3000 -e MERIDIAN_CONFIG=/app/config/app.json -v meridian-data:/app/data meridian-tdoa:0.3.0
+docker run --rm --init -p 3000:3000 -e MERIDIAN_CONFIG=/app/config/production.json -v meridian-data:/app/data meridian-tdoa:0.3.0
 ```
 
 Single measurements from the command line:
@@ -72,6 +72,7 @@ See [any-SDR nodes](docs/NODES.md).
 |---|---|
 | Understand the measurements and their limits | [Method and validation](docs/VALIDATION.md) |
 | Run it, configure receivers, retention and the monitor | [Deployment and operation](docs/PRODUCTION.md) |
+| Run it on your own server behind Apache and Cloudflare | [Own server](docs/HOSTING.md#own-server-behind-apache) |
 | Add my own SDR nodes | [Nodes, SigMF and detections](docs/NODES.md) |
 | Integrate with the backend | [API reference](docs/API.md) |
 | Use public KiwiSDRs fairly | [Live sources](docs/LIVE-SOURCES.md) |

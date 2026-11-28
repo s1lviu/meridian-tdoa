@@ -33,7 +33,8 @@ These rules come from [CONTRIBUTING.md](CONTRIBUTING.md).
 | `src/bin/meridian-node.rs` | Edge node agent (SigMF, optional SoapySDR) |
 | `web/` | The map: plain JavaScript and Leaflet, no build step. `web/vendor/` is copied from `node_modules` by `npm run vendor` |
 | `tests/` | Rust integration tests, Python and Playwright end-to-end checks, container acceptance |
-| `config/` | `app.json` (default, replay only) and `production.json` (live monitor) |
+| `config/` | `app.json` (default, no capture) and `production.json` (live monitor) |
+| `deploy/` | Own server: `host/` (compose with resource limits, setup, release activation) and a Caddy example for a dedicated server |
 | `docs/`, `evidence/` | Documentation and measured results |
 | `.github/workflows/ci.yml` | CI: the `verify` job and the `container` job on x86_64 |
 
@@ -78,16 +79,19 @@ Individual commands are in [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md#checks).
 ## Run it
 
 ```sh
-cargo run --locked                                                   # config/app.json: replay of the bundled 2020 DCF77 recording
+cargo run --locked                                                   # config/app.json: no capture from public receivers
 MERIDIAN_CONFIG=config/production.json cargo run --release --locked  # live monitor: contacts public KiwiSDRs
 ```
 
 Start the live profile only when you mean to capture, because it uses real receivers' time. `MERIDIAN_DIRECTORY_OFFLINE=1` stops directory refreshes.
 
+The map shows live data only. The archived 2020 DCF77 recording under `data/recordings/` is a test fixture: the Rust tests read it, and the container copies it into `data/` only with `MERIDIAN_SEED_RECORDING=1` (`tests/container.sh`).
+
 ## Deployment and git
 
 - **`main` deploys itself.** It goes to Render (Free, Frankfurt) once all GitHub checks pass (`render.yaml`, `autoDeployTrigger: checksPass`).
 - **Every deploy wipes data.** It restarts the service, and Free has no disk, so observations collected so far are lost. Batch changes and merge on purpose.
+- **Own server.** `scripts/deploy-host.sh SSH_HOST [REF]` deploys one commit to a host prepared once with `deploy/host/setup.sh` ([docs/HOSTING.md](docs/HOSTING.md#own-server-behind-apache)). It builds on the host, waits for the health check and rolls back on failure.
 - **Branches only.** Work on a branch and open a pull request; never push to `main`.
 - **Secrets.** Never commit `.env`, tokens, captures or `.secrets/`. The administrator token comes from `MERIDIAN_ADMIN_TOKEN_FILE` or `MERIDIAN_ADMIN_TOKEN`.
 

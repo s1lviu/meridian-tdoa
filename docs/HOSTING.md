@@ -1,4 +1,71 @@
-# Free hosting options
+# Hosting
+
+## Own server behind Apache
+
+For a host that already serves other sites with Apache and certbot. Meridian runs as one container bound to `127.0.0.1`, and Apache proxies the public hostname to it.
+
+Prepare the host once, as root:
+
+```sh
+sudo DOMAIN=meridian.example.org sh deploy/host/setup.sh   # PORT=8790 and DATA_SIZE=10G by default
+```
+
+| Created | Where | Purpose |
+|---|---|---|
+| Releases, compose settings, administrator token (mode 0600) | `/opt/meridian` | Owned by the deploy user |
+| Fixed-size ext4 filesystem (default 10 GiB), mounted at boot | `/srv/meridian/data.img` on `/srv/meridian/data` | Meridian's data can never fill the host disk. Without the mount the container refuses to start instead of writing to the root disk |
+| Apache site on port 80 | `/etc/apache2/sites-available/DOMAIN.conf` | Proxies everything except `/.well-known/acme-challenge/`, and never redirects |
+| Certificate and port 443 site | certbot webroot, `DOMAIN-le-ssl.conf` | Lets Cloudflare use Full (strict) for this hostname |
+
+Every Apache change passes `apache2ctl configtest` before a graceful reload. A rejected site is disabled again, so the other sites keep running.
+
+Deploy a commit from a workstation:
+
+```sh
+scripts/deploy-host.sh SSH_HOST [GIT_REF]
+```
+
+Only committed files are shipped.
+
+1. The host builds the image in its own BuildKit builder, limited to three cores and 6 GiB, with its cache capped at 8 GB.
+2. It starts the image with `deploy/host/compose.yaml`, then waits for the container health check and `/api/ready`.
+3. If the check fails, it restarts the previous image.
+4. It keeps the three newest releases and their images.
+
+Limits of the running service (`deploy/host/compose.yaml`):
+
+- **CPU and memory:**
+  - 3 GiB of memory without swap (`MERIDIAN_MEMORY`);
+  - 2 CPUs (`MERIDIAN_CPUS`) at half the default CPU weight;
+  - `oom_score_adj` 500, so it is the first candidate if the host runs out of memory.
+- **Processes and files:** 256 processes and 8192 open files.
+- **Isolation:** read-only root filesystem, no capabilities, `no-new-privileges`, and a 256 MiB `/tmp` in memory.
+- **Disk:**
+  - 2 GiB IQ quota inside the data filesystem (`MERIDIAN_CAPTURE_QUOTA_BYTES`);
+  - container logs capped at 3 × 10 MB;
+  - Apache logs rotated daily by logrotate.
+
+### Cloudflare
+
+When the hostname is proxied and the zone uses the **Flexible** SSL mode, Cloudflare connects to port 80 over HTTP. The port 80 site serves the application, and Cloudflare redirects visitors to HTTPS.
+
+Once certbot has issued the certificate, a configuration rule can set **Full (strict)** for this hostname only, which also encrypts the traffic between Cloudflare and the server. Changing the zone-wide mode would affect every other hostname in the zone.
+
+Server-sent events pass through Cloudflare and Apache. The application sends a keep-alive comment every 15 s, so proxies with idle timeouts keep the stream open.
+
+### Operations on the host
+
+```sh
+cd /opt/meridian && docker compose --env-file .env --env-file image.env logs -f app
+docker stats meridian-app-1      # memory and CPU against the limits
+df -h /srv/meridian/data         # data filesystem
+```
+
+The administrator token is in `/opt/meridian/.secrets/runtime.env`.
+
+Run the live monitor on one instance only. Each instance keeps its own fair-use budget, so two instances double the load on public receivers.
+
+## Free hosting options
 
 Reviewed on **27 November 2026**. This comparison concerns the existing Rust + Python Docker application, outbound KiwiSDR WebSockets and a durable IQ archive. Provider documentation is evidence of product terms, not a successful RF acceptance test. No provider listed here has been deployed or tested for live capture by this project.
 

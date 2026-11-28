@@ -15,7 +15,7 @@ const ago = (t) => {
 const icons = () => window.lucide?.createIcons();
 const PROFILE = { ft8_v1: "FT8", dcf77_prn_v1: "DCF77", correlated_v1: "Unknown", mlat_v1: "Node", ncdxf_cw_v1: "IBP" };
 
-const state = { mode: "live", info: null, data: null, tracks: [], stats: [], statsStart: 0, selected: null, refreshing: false, pending: false, scenario: "normal" };
+const state = { info: null, data: null, tracks: [], stats: [], statsStart: 0, selected: null, refreshing: false, pending: false };
 const map = L.map("map", { worldCopyJump: true, zoomSnap: 0.25, minZoom: 1, maxZoom: 14, zoomControl: false }).setView([35, 5], 2.5);
 L.control.zoom({ position: "bottomright" }).addTo(map);
 L.control.scale({ imperial: false, position: "bottomright" }).addTo(map);
@@ -86,7 +86,7 @@ const clock = (ms) => {
 };
 function tick() {
   const el = $("next-window");
-  if (state.mode !== "live" || !monitor.configured || (!monitor.nextAt && !monitor.notice)) {
+  if (!monitor.configured || (!monitor.nextAt && !monitor.notice)) {
     el.hidden = true;
     return;
   }
@@ -154,11 +154,6 @@ function displayRegion(points, center, grid) {
 }
 
 function interval() {
-  if (state.mode === "replay") {
-    const d = state.info?.datasets?.[0];
-    const t = Date.parse(d?.capture_utc || "2020-08-13T06:52:20Z");
-    return [new Date(t - 60000).toISOString(), new Date(t + 120000).toISOString()];
-  }
   const hours = Number($("window").value);
   return [new Date(Date.now() - hours * 3600e3).toISOString(), new Date(Date.now() + 60e3).toISOString()];
 }
@@ -174,7 +169,7 @@ function resetPaintWindow() {
 }
 document.addEventListener("visibilitychange", () => {
   resetPaintWindow();
-  if (!document.hidden && state.mode === "live") refresh();
+  if (!document.hidden) refresh();
 });
 function measureMap(scope) {
   const current = new Set(), arrived = [];
@@ -210,15 +205,15 @@ async function refresh() {
     const [start, end] = interval();
     const band = $("band").value;
     const profile = $("profile").value;
-    const scope = [state.mode, band, profile, $("window").value].join("/");
-    const q = `mode=${state.mode}&compact=true&start=${start}&end=${end}&band=${band}&scenario=${state.scenario}`;
-    const tasks = [api(`/api/emissions?${q}`)];
-    if (state.mode === "live") {
-      tasks.push(api(`/api/tracks?since=${start}&band=${band}`), api(`/api/stats?start=${start}&end=${end}`));
-      loadMonitor();
-    }
-    const [data, tracks, stats] = await Promise.all(tasks);
-    if (scope !== [state.mode, $("band").value, $("profile").value, $("window").value].join("/")) { state.pending = true; return; }
+    const scope = [band, profile, $("window").value].join("/");
+    const q = `mode=live&compact=true&start=${start}&end=${end}&band=${band}`;
+    loadMonitor();
+    const [data, tracks, stats] = await Promise.all([
+      api(`/api/emissions?${q}`),
+      api(`/api/tracks?since=${start}&band=${band}`),
+      api(`/api/stats?start=${start}&end=${end}`),
+    ]);
+    if (scope !== [$("band").value, $("profile").value, $("window").value].join("/")) { state.pending = true; return; }
     state.data = data;
     state.tracks = (tracks?.tracks || []).filter((t) => profile === "all" || t.track.profile === profile || (profile === "dcf77_prn_v1" && t.track.key === "ref:DCF77"));
     drawTracks();
@@ -227,15 +222,10 @@ async function refresh() {
     state.stats = stats?.rows || [];
     state.statsStart = Date.parse(start);
     drawStats();
-    if (state.mode === "live") measureMap(scope);
-    if (state.mode === "live") {
-      const obs = data.monitoring?.segments?.length || 0;
-      setStatus(`${obs} observation(s) in window · ${state.tracks.length} located`, state.stream === "open" ? "ok" : "warn");
-    }
-    if (state.mode === "replay" && !state.selected) {
-      const first = data.emissions[0] || data.unlocated[0];
-      if (first) selectObservation(first.id);
-    }
+    measureMap(scope);
+    const obs = data.monitoring?.segments?.length || 0;
+    const capture = state.info?.live_enabled === false ? " · capture off on this server" : "";
+    setStatus(`${obs} observation(s) in window · ${state.tracks.length} located${capture}`, state.stream === "open" ? "ok" : "warn");
   } catch (e) {
     setStatus("API unavailable", "warn");
     notify(e.message);
@@ -326,7 +316,7 @@ function drawStats() {
     tr.innerHTML = `<td>${esc(PROFILE[r.profile] || r.profile)} · ${esc(r.band)}</td><td>${r.heard}</td><td>${r.timed_two_plus}</td><td>${r.located}</td><td>${fmt(r.fixes_per_hour, 2)}</td><td>${km(r.median_error_km)} / ${km(r.p90_error_km)}</td><td>${pct(r.ellipse_68_coverage)} / ${pct(r.contour_coverage)}</td><td class="api-delay">${latencyText(r.median_publication_latency_s, r.p90_publication_latency_s, r.publication_latency_count)}</td><td class="paint-delay">${latencyText(median, p90, n)}</td>`;
     body.append(tr);
   }
-  if (!rows.length) body.innerHTML = `<tr><td colspan="9" class="note">${state.mode === "live" ? "No live observation in this window." : "Live statistics only."}</td></tr>`;
+  if (!rows.length) body.innerHTML = `<tr><td colspan="9" class="note">No live observation in this window.</td></tr>`;
 }
 
 function inspector(html) {
@@ -402,23 +392,6 @@ async function waitJob(id) {
   throw new Error("Job still running");
 }
 
-function setMode(mode) {
-  resetPaintWindow();
-  state.mode = mode;
-  state.selected = null;
-  state.scenario = "normal";
-  $("inspector").hidden = true;
-  receivers.clearLayers();
-  $("mode-live").setAttribute("aria-selected", mode === "live");
-  $("mode-replay").setAttribute("aria-selected", mode === "replay");
-  $("mode-badge").textContent = mode === "live" ? "LIVE · OWN RF ONLY" : "REAL RECORDING · ARCHIVED IQ";
-  $("mode-badge").className = `badge ${mode === "live" ? "live" : "replay"}`;
-  $("replay-card").hidden = mode !== "replay";
-  if (mode === "replay") setStatus("Archived recording", "ok");
-  tick();
-  refresh();
-}
-
 function modal(title, html) {
   $("modal-title").textContent = title;
   $("modal-body").innerHTML = html;
@@ -426,8 +399,6 @@ function modal(title, html) {
   icons();
 }
 
-$("mode-live").onclick = () => setMode("live");
-$("mode-replay").onclick = () => setMode("replay");
 for (const id of ["window", "band", "profile"]) $(id).onchange = refresh;
 $("show-observations").onchange = () => drawFixes($("profile").value);
 $("show-receivers").onchange = () => state.selected?.observation && selectObservation(state.selected.observation);
@@ -467,41 +438,28 @@ $("capture-open").onclick = () => {
     } catch (e) { notify(e.message); }
   };
 };
-async function replay(fault) {
-  const d = state.info?.datasets?.[0];
-  if (!d) return notify("No recording bundled");
-  try {
-    const job = await api("/api/replay", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ dataset_id: d.id, fault_receiver: fault ? d.receivers[d.receivers.length - 1].id : null }) });
-    if (!job.cached) await waitJob(job.job_id);
-    state.scenario = fault ? "sync-loss" : "normal";
-    state.selected = null;
-    refresh();
-  } catch (e) { notify(e.message); }
-}
-$("replay-open").onclick = () => replay(false);
-$("sync-loss").onclick = () => replay(true);
-
 function stream() {
   if (!window.EventSource) return;
   const es = new EventSource("/api/stream");
   es.onopen = () => { state.stream = "open"; };
-  es.onerror = () => { resetPaintWindow(); state.stream = "reconnecting"; if (state.mode === "live") setStatus("Live updates reconnecting…", "warn"); };
+  es.onerror = () => { resetPaintWindow(); state.stream = "reconnecting"; setStatus("Live updates reconnecting…", "warn"); };
   let timer;
   es.addEventListener("change", () => {
     clearTimeout(timer);
-    timer = setTimeout(() => { if (state.mode === "live" && !document.hidden) refresh(); }, 800);
+    timer = setTimeout(() => { if (!document.hidden) refresh(); }, 800);
   });
 }
 
+// The map shows live data only: observations from our own captures and nodes, never archives.
 async function boot() {
   icons();
   try {
     state.info = await api("/api/info");
-    const d = state.info.datasets?.[0];
-    if (d) $("replay-text").textContent = `${d.title} · ${utc(d.capture_utc)} · ${d.receivers.length} receivers. Archived IQ, not live.`;
     const params = new URLSearchParams(location.search);
     stream();
-    setMode(params.has("replay") || !state.info.live_enabled ? "replay" : "live");
+    resetPaintWindow();
+    tick();
+    refresh();
     if (params.get("track")) selectTrack(params.get("track"));
     if (params.get("observation")) selectObservation(params.get("observation"));
   } catch (e) {
@@ -510,6 +468,6 @@ async function boot() {
   }
 }
 // Fallback refresh when push updates are unavailable; receivers are never contacted from here.
-setInterval(() => { if (state.mode === "live" && !document.hidden && state.stream !== "open") refresh(); }, 30000);
+setInterval(() => { if (!document.hidden && state.stream !== "open") refresh(); }, 30000);
 setInterval(tick, 1000);
 boot();

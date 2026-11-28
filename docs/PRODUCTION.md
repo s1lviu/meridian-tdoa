@@ -26,7 +26,7 @@ With Docker, `scripts/deploy.sh your-domain.example` builds the image, generates
 
 Every `interval_s` the monitor opens a window of `parallel_bands` targets on disjoint receivers; windows run in the background, so the next one starts on time while earlier ones are still processing (`max_parallel_jobs`, default 2). Windows with an FT8 target start 4 s before a 15 s UTC boundary so a full slot is recorded.
 
-Directory-driven targets alternate reconnaissance with measurement. Reconnaissance rotates a geographic anchor. A generic-channel probe lasts up to 15 s. Measurement ranks sites by recent per-receiver RF strength on that channel, checks the first triangle for collinearity and favours the configured spacing. The scheduler progressively relaxes spacing if few sites are eligible. Two independent silent windows inside six hours remove a site from that channel temporarily. Reprocessing a recording counts as the original listen. The scheduler uses receiver coordinates and reception history.
+Directory-driven targets alternate reconnaissance with measurement. With `directory_receivers` set, every profile picks its receivers from the directory; `source_ids` then only matter as seeds for DCF77. Reconnaissance rotates a geographic anchor, except for DCF77: LF ground wave reaches a region, so its reconnaissance starts at the eligible receiver nearest to the mean position of its configured receivers. That point is derived from receiver positions only, never from the transmitter, and the solver never sees it. A receiver whose IQ lacks the PTB phase code in two captures within six hours is skipped on that channel. A generic-channel probe lasts up to 15 s. Measurement ranks sites by recent per-receiver RF strength on that channel, checks the first triangle for collinearity and favours the configured spacing. The scheduler progressively relaxes spacing if few sites are eligible. Two independent silent windows inside six hours remove a site from that channel temporarily. Reprocessing a recording counts as the original listen. The scheduler uses receiver coordinates and reception history.
 
 Targets and their verification profiles:
 
@@ -43,8 +43,9 @@ KiwiSDR operators publish whether external software may connect (`ext_api`) and 
 
 - checks `/status` (access policy, GNSS, antenna, free channels) immediately before every connection;
 - keeps one connection per receiver at a time, at least `min_gap_s` (60 s) apart;
-- budgets `daily_minutes` (60) of connection time per receiver per rolling 24 h;
-- backs off exponentially after failures (10 min doubling, at most 24 h) and honours explicit refusals. Per-IP limits and password requirements set a 24 h block, a receiver reporting downtime sets at least 1 h and busy channels set at least 10 min.
+- budgets `daily_minutes` (60) of connection time per receiver per rolling 24 h. Connection time runs from the opened session to its end, so failed, timed-out and refused sessions count too;
+- backs off exponentially after failures (10 min doubling, at most 24 h) and honours explicit refusals. Per-IP limits and password requirements set a 24 h block, a receiver reporting downtime sets at least 1 h and busy channels set at least 10 min;
+- treats a KiwiSDR relay (`*.proxy.kiwisdr.com`, `proxy2`, `proxy3`) as one host. If it refuses the TCP connection to every receiver behind it in a capture, the relay is blocked with the same back-off and none of its receivers is contacted until the block ends.
 
 ```json
 "receivers": {"daily_minutes": 60, "min_gap_s": 60}
