@@ -1,5 +1,5 @@
 {
- "executed_at": "2026-11-28T12:06:04.932Z",
+ "executed_at": "2026-11-28T14:14:28.553Z",
  "checks": [
   "live only: no archived recording in the page or the API",
   "live: countdown to the next scheduled window",
@@ -10,6 +10,8 @@
   "observation inspector: located, five receivers, pair delays",
   "two live fixes have P50/P90 and counts, reloading keeps only measured API latency",
   "390 px layout: nothing wider than the screen, status line visible",
+  "desktop: paged results, grouped labels, focus and motion, both ambiguous regions, optional globe and date-line fit",
+  "390 px: paged results, grouped labels, focus and motion, both ambiguous regions, optional globe and date-line fit",
   "no page errors"
  ]
 }

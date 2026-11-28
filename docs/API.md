@@ -47,7 +47,7 @@ Each estimate carries `center`, the 95% `polygon` and `radius_km`, `residual_us`
 
 `GET /api/stats?start=…&end=…` includes every live observation whose RF start falls in the half-open UTC interval. The rate divides the number of unique fixes by the full interval in hours. Error and coverage fields include their evaluation counts and use independent references where available. P50 averages the two middle values for an even sample. P90 uses nearest rank. The 68% coverage uses the local two-dimensional covariance ellipse and the 95% coverage uses the reported contour.
 
-`publication_latency_count`, `median_publication_latency_s` and `p90_publication_latency_s` measure from RF time to the first stored fix. Importing archived observations does not establish an original publication time. A node network without a UTC master can report relative delays but supplies no absolute RF latency. The map also shows RF-to-display time for new observations received on an open foreground tab, measured after the rendering frame. This session metric depends on the client clock.
+`publication_latency_count`, `median_publication_latency_s` and `p90_publication_latency_s` measure from RF time to the first stored fix. Importing archived observations does not establish an original publication time. A node network without a UTC master can report relative delays but supplies no absolute RF latency. The map measures RF-to-display time after the rendering frame for newly received fixes represented by a visible overview marker or area group in the foreground tab. Inspection holds the current view. This session metric depends on the client clock.
 
 ## Push updates
 

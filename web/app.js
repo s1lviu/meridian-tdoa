@@ -16,7 +16,9 @@ const icons = () => window.lucide?.createIcons();
 const PROFILE = { ft8_v1: "FT8", dcf77_prn_v1: "DCF77", correlated_v1: "Unknown", mlat_v1: "Node", ncdxf_cw_v1: "IBP" };
 
 const state = { info: null, data: null, tracks: [], stats: [], statsStart: 0, selected: null, refreshing: false, pending: false };
-const map = L.map("map", { worldCopyJump: true, zoomSnap: 0.25, minZoom: 1, maxZoom: 14, zoomControl: false }).setView([35, 5], 2.5);
+const map = L.map("map", { worldCopyJump: true, zoomSnap: 0.25, minZoom: 0, maxZoom: 14, zoomControl: false, zoomAnimation: !reducedMotion() });
+const openingZoom = Math.max(0, Math.min(2.5, Math.floor(4 * Math.log2(map.getSize().x / 256)) / 4));
+map.setView([22, 0], openingZoom);
 L.control.zoom({ position: "bottomright" }).addTo(map);
 L.control.scale({ imperial: false, position: "bottomright" }).addTo(map);
 const land = L.layerGroup().addTo(map);
@@ -24,21 +26,30 @@ const cities = L.layerGroup().addTo(map);
 const fixes = L.layerGroup().addTo(map);
 const tracksLayer = L.layerGroup().addTo(map);
 const receivers = L.layerGroup().addTo(map);
+const selectedEvidence = L.layerGroup().addTo(map);
 
-fetch("/world.geojson")
-  .then((r) => r.json())
-  .then((g) => L.geoJSON(g, { interactive: false, style: { color: "#2a3a46", weight: 0.7, fillColor: "#17232c", fillOpacity: 1 } }).addTo(land))
-  .catch(() => {});
 let places = [];
-fetch("/places.json").then((r) => (r.ok ? r.json() : [])).then((p) => { places = p; drawCities(); }).catch(() => {});
+initializeMapView();
+let worldRequest;
+function loadWorld() {
+  worldRequest ??= fetch("/world.geojson").then(r => {
+    if (!r.ok) throw Error("Basemap unavailable");
+    return r.json();
+  }).then(g => { worldGeometry = g; drawLand(); return g; }).catch(err => { worldRequest = null; throw err; });
+  return worldRequest;
+}
+loadWorld().catch(() => {});
+fetch("/places.json").then((r) => (r.ok ? r.json() : [])).then((p) => { places = p; drawCities(); placeLabels(); }).catch(() => {});
 function drawCities() {
   cities.clearLayers();
   const z = map.getZoom();
+  const bounds = map.getBounds().pad(0.05);
   for (const [minZoom, name, lat, lon] of places) {
-    if (z >= minZoom + 1.5) L.marker([lat, lon], { interactive: false, icon: L.divIcon({ className: "city", html: esc(name), iconSize: null }) }).addTo(cities);
+    if (z < minZoom + 1.5) continue;
+    const point = visiblePoint([lat, lon]);
+    if (bounds.contains(point)) L.marker(point, { interactive: false, keyboard: false, icon: L.divIcon({ className: "city", html: esc(name), iconSize: null }) }).addTo(cities);
   }
 }
-map.on("zoomend", drawCities);
 
 async function api(path, options) {
   const r = await fetch(path, options);
@@ -143,12 +154,13 @@ const positionText = (p, grid) => grid ? "Locator " + locatorCell(p).name : fmt(
 
 // The displayed bounds cover the whole confidence region, rounded out to cell edges.
 function displayRegion(points, center, grid) {
-  if (!grid) return points;
+  if (!grid) return points.map(([lat, lon]) => [lat, nearLongitude(lon, center.lon)]);
   const cell = locatorCell(center);
   const lats = points.map(([lat]) => lat).concat(cell.south, cell.south + 1);
   const lons = points.map(([, lon]) => center.lon + ((lon - center.lon + 540) % 360) - 180);
-  const west = Math.min(cell.west, 2 * Math.floor(Math.min(...lons) / 2));
-  const east = Math.max(cell.west + 2, 2 * Math.ceil(Math.max(...lons) / 2));
+  const cellWest = nearLongitude(cell.west + 1, center.lon) - 1;
+  const west = Math.min(cellWest, 2 * Math.floor(Math.min(...lons) / 2));
+  const east = Math.max(cellWest + 2, 2 * Math.ceil(Math.max(...lons) / 2));
   const south = Math.floor(Math.min(...lats)), north = Math.ceil(Math.max(...lats));
   return [[south, west], [north, west], [north, east], [south, east]];
 }
@@ -177,7 +189,7 @@ function measureMap(scope) {
     const id = track.observations.at(-1);
     const at = Date.parse(track.last_utc);
     current.add(id);
-    if (scope !== viewScope || !track.rf_utc || at < visibleSince || lastDrawn.has(id)) continue;
+    if (scope !== viewScope || state.selected || !overview.drawnKeys?.has(track.key) || !track.rf_utc || at < visibleSince || lastDrawn.has(id)) continue;
     const hz = track.frequency_hz;
     const band = track.band || (hz < 300e3 ? "LF" : hz < 3e6 ? "MF" : hz < 30e6 ? "HF" : hz < 300e6 ? "VHF" : hz < 3e9 ? "UHF" : "SHF");
     arrived.push({profile: track.profile, band, at, id});
@@ -216,16 +228,15 @@ async function refresh() {
     if (scope !== [$("band").value, $("profile").value, $("window").value].join("/")) { state.pending = true; return; }
     state.data = data;
     state.tracks = (tracks?.tracks || []).filter((t) => profile === "all" || t.track.profile === profile || (profile === "dcf77_prn_v1" && t.track.key === "ref:DCF77"));
-    drawTracks();
-    drawFixes(profile);
-    drawLists(profile);
+    recordArrivals(data, scope, profile);
+    if (!state.selected) { drawLists(profile); updateOverview(); }
     state.stats = stats?.rows || [];
     state.statsStart = Date.parse(start);
     drawStats();
     measureMap(scope);
     const obs = data.monitoring?.segments?.length || 0;
     const capture = state.info?.live_enabled === false ? " · capture off on this server" : "";
-    setStatus(`${obs} observation(s) in window · ${state.tracks.length} located${capture}`, state.stream === "open" ? "ok" : "warn");
+    setStatus(`${obs} ${obs === 1 ? "observation" : "observations"} in window · ${state.tracks.length} located${capture}`, state.stream === "open" ? "ok" : "warn");
   } catch (e) {
     setStatus("API unavailable", "warn");
     notify(e.message);
@@ -233,62 +244,6 @@ async function refresh() {
     state.refreshing = false;
     if (state.pending) { state.pending = false; refresh(); }
   }
-}
-
-function drawTracks() {
-  tracksLayer.clearLayers();
-  for (const { track: t, ellipse_95: el } of state.tracks) {
-    const name = trackName(t);
-    const grid = gridDisplay(t.profile, t.callsign);
-    const region = displayRegion(ellipse(t.center, el.major_km, el.minor_km, el.azimuth_deg), t.center, grid);
-    const shape = L.polygon(region, { color: "#5fd4a6", weight: 2, fillOpacity: 0.18 });
-    shape.on("click", () => selectTrack(t.key));
-    shape.bindTooltip(`${esc(name)} · ${t.fixes} fix(es) · ±${km(el.major_km)}`, { sticky: true });
-    shape.addTo(tracksLayer);
-    const marker = grid ? locatorCell(t.center).center : [t.center.lat, t.center.lon];
-    if (!grid) L.circleMarker(marker, { radius: 4, color: "#e8fff7", weight: 1, fillColor: "#5fd4a6", fillOpacity: 1, className: "tx-point" }).on("click", () => selectTrack(t.key)).addTo(tracksLayer);
-    L.marker(marker, { interactive: false, icon: L.divIcon({ className: "tx-label", html: esc(name), iconSize: null, iconAnchor: [-8, 6] }) }).addTo(tracksLayer);
-  }
-}
-
-function drawFixes(profile) {
-  fixes.clearLayers();
-  if (!$("show-observations").checked || !state.data) return;
-  for (const e of state.data.emissions) {
-    if (profile !== "all" && e.profile !== profile) continue;
-    for (const est of e.estimate ? [e.estimate] : e.hypotheses) {
-      const region = displayRegion(polygon(est), est.center, gridDisplay(e.profile, e.identity?.callsign));
-      const p = L.polygon(region, { color: e.estimate ? "#7cc7ff" : "#c79bff", weight: 1.2, dashArray: e.estimate ? null : "5 4", fillOpacity: 0.05, className: e.estimate ? "fix-region" : "hypothesis-region" });
-      p.bindTooltip(`${esc(label(e))} · ${utc(e.start_utc)} · ${e.estimate ? "single fix" : "ambiguous"}`, { sticky: true });
-      p.on("click", () => selectObservation(e.id));
-      p.addTo(fixes);
-    }
-  }
-}
-
-function drawLists(profile) {
-  const list = $("track-list");
-  list.innerHTML = "";
-  for (const { track: t, ellipse_95: el } of state.tracks) {
-    const li = document.createElement("li");
-    li.innerHTML = `<button><span><span class="call">${esc(trackName(t))}</span> <span class="meta">${esc(t.band || freq(t.frequency_hz))} · ${t.fixes} fix${t.fixes > 1 ? "es" : ""}</span></span><span class="meta">±${km(el.major_km)} · ${ago(t.last_utc)}</span></button>`;
-    li.firstChild.onclick = () => selectTrack(t.key);
-    list.append(li);
-  }
-  $("located-count").textContent = state.tracks.length;
-  $("track-empty").hidden = state.tracks.length > 0;
-  const heard = $("heard-list");
-  heard.innerHTML = "";
-  const rows = [...(state.data?.unlocated || []), ...(state.data?.emissions || []).filter((e) => !e.estimate)]
-    .filter((e) => profile === "all" || e.profile === profile)
-    .slice(0, 120);
-  for (const e of rows) {
-    const li = document.createElement("li");
-    li.innerHTML = `<button><span><span class="call">${esc(label(e))}</span> <span class="meta">${e.confirmed_count} rx · ${e.accepted_pair_count}/${e.pair_count} pairs</span></span><span class="meta">${esc(utc(e.start_utc).slice(11, 19))}</span></button>`;
-    li.firstChild.onclick = () => selectObservation(e.id);
-    heard.append(li);
-  }
-  $("heard-count").textContent = rows.length;
 }
 
 const pct = (x) => x == null ? "—" : fmt(100 * x) + "%";
@@ -319,70 +274,6 @@ function drawStats() {
   if (!rows.length) body.innerHTML = `<tr><td colspan="9" class="note">No live observation in this window.</td></tr>`;
 }
 
-function inspector(html) {
-  const el = $("inspector");
-  el.innerHTML = `<button class="icon-button close" id="inspector-close" aria-label="Close"><i data-lucide="x"></i></button>${html}`;
-  el.hidden = false;
-  $("inspector-close").onclick = () => { el.hidden = true; state.selected = null; receivers.clearLayers(); };
-  icons();
-}
-
-async function selectTrack(key) {
-  try {
-    const d = await api(`/api/tracks/${encodeURIComponent(key)}`);
-    const t = d.track, el = d.ellipse_95;
-    state.selected = { track: key };
-    receivers.clearLayers();
-    const obs = d.observations.map((o) => `<div class="rx-row"><span class="rx-dot ${o.estimate ? "used" : "heard"}"></span><button class="link" data-id="${esc(o.id)}">${esc(utc(o.start_utc))}</button><span>${o.estimate ? `±${km(o.estimate.radius_km)}` : esc(o.status)}</span></div>`).join("");
-    inspector(`<h3>${esc(trackName(t))}</h3><p class="sub">${esc(PROFILE[t.profile] || t.profile || "")} · ${esc(t.band || "")} · ${freq(t.frequency_hz)}</p>
-      <dl><dt>Position</dt><dd>${positionText(t.center, gridDisplay(t.profile, t.callsign))}</dd>
-      <dt>95% ellipse</dt><dd>${km(el.major_km)} × ${km(el.minor_km)}, axis ${fmt(el.azimuth_deg)}°</dd>
-      <dt>Fused fixes</dt><dd>${t.fixes} (gate rejected ${t.rejected})</dd>
-      <dt>Seen</dt><dd>${esc(utc(t.first_utc))} → ${esc(utc(t.last_utc))}</dd></dl>
-      <p class="note">Covariance intersection of successive fixes: shared ionospheric and antenna errors are not assumed to average out.</p>
-      <h4>Contributing observations</h4>${obs}`);
-    for (const b of document.querySelectorAll("#inspector .link")) b.onclick = () => selectObservation(b.dataset.id);
-    map.fitBounds(displayRegion(ellipse(t.center, el.major_km, el.minor_km, el.azimuth_deg), t.center, gridDisplay(t.profile, t.callsign)), { padding: [40, 40], maxZoom: 9 });
-  } catch (e) { notify(e.message); }
-}
-
-async function selectObservation(id) {
-  try {
-    const e = await api(`/api/emissions/${encodeURIComponent(id)}`);
-    state.selected = { observation: id };
-    receivers.clearLayers();
-    if ($("show-receivers").checked) {
-      for (const r of e.receivers) {
-        const cls = r.used ? "used" : r.confirmed ? "heard" : "";
-        L.marker([r.position.lat, r.position.lon], { icon: L.divIcon({ className: "", html: `<div class="rx-icon ${cls}"></div>`, iconSize: [12, 12] }) })
-          .bindTooltip(`${esc(r.label || r.id)}${r.used ? " · used" : r.confirmed ? " · heard" : r.reason ? " · " + esc(r.reason) : ""}`)
-          .addTo(receivers);
-      }
-    }
-    const status = e.estimate ? "located" : e.hypotheses?.length || e.detected ? "undetermined" : "none";
-    const ests = e.estimate ? [e.estimate] : e.hypotheses || [];
-    const ft8 = e.reference?.ft8;
-    const rx = e.receivers.map((r) => `<div class="rx-row"><span class="rx-dot ${r.used ? "used" : r.confirmed ? "heard" : ""}"></span><span>${esc(r.label || r.id)}</span><span class="note">${r.used ? "used" : r.confirmed ? "timed" : esc(r.reason || "not confirmed")}</span></div>`).join("");
-    const pairs = e.pairs.slice(0, 40).map((p) => `<div class="pair-row"><span>${esc(p.a.slice(0, 8))}→${esc(p.b.slice(0, 8))}</span><span>${us(p.delay_us)} ± ${us(p.sigma_us)}</span><span class="${p.accepted ? "good" : "bad"}">${p.accepted ? "accepted" : "rejected"}</span></div>`).join("");
-    let evaluation = "";
-    try {
-      const ev = await api(`/api/emissions/${encodeURIComponent(id)}/evaluation`);
-      evaluation = `<h4>Post-hoc check</h4><p class="note">Reference: ${esc(ev.reference_source)}${ev.grid ? " · locator " + esc(ev.grid) : ""}. Never used by the solver.</p>` +
-        ev.solutions.map((s) => `<div class="pair-row"><span>solution</span><span>${km(s.error_km)}${s.error_range_km ? ` (${km(s.error_range_km[0])}–${km(s.error_range_km[1])})` : ""}</span><span>±${km(s.model_radius_km)}</span></div>`).join("");
-    } catch { /* no hold-out reference for this observation */ }
-    inspector(`<h3>${esc(e.identity?.callsign || e.title)}</h3><p class="sub">${esc(utc(e.start_utc))} · ${freq(e.frequency_hz)}</p>
-      <p><span class="status-pill ${status}">${status === "located" ? "Located" : status === "undetermined" ? "Position undetermined" : "No detection"}</span></p>
-      ${e.reason ? `<p class="note">${esc(e.reason)}</p>` : ""}
-      ${ft8 ? `<dl><dt>Message</dt><dd>${esc(ft8.message)}</dd><dt>Heard by</dt><dd>${ft8.receivers.filter((r) => r.decoded).length} decoded · ${ft8.receivers.filter((r) => r.arrival_s != null).length} timed</dd></dl>` : ""}
-      ${ests.map((s, i) => `<dl><dt>${ests.length > 1 ? "Hypothesis " + (i + 1) : "Estimate"}</dt><dd>${positionText(s.center, gridDisplay(e.reference?.profile, e.identity?.callsign))}</dd><dt>95% region</dt><dd>${km(s.radius_km)} max radius</dd><dt>Residual</dt><dd>${us(s.residual_us)} rms${s.scale ? ` · scale ${fmt(s.scale, 2)}` : ""}</dd></dl>`).join("")}
-      <h4>Receivers</h4>${rx}${e.excluded?.length ? `<p class="note">${e.excluded.length} receiver(s) excluded by the RF verifier.</p>` : ""}
-      <h4>Pair delays (B − A)</h4>${pairs || '<p class="note">No pair of timed receivers.</p>'}${evaluation}
-      <p class="note">${esc(e.provenance?.note || "")}</p>`);
-    const bounds = [...ests.flatMap((s) => displayRegion(polygon(s), s.center, gridDisplay(e.reference?.profile, e.identity?.callsign))), ...e.receivers.map((r) => [r.position.lat, r.position.lon])];
-    if (bounds.length) map.fitBounds(bounds, { padding: [50, 50], maxZoom: 9 });
-  } catch (err) { notify(err.message); }
-}
-
 async function waitJob(id) {
   for (let i = 0; i < 600; i++) {
     const j = await api(`/api/jobs/${encodeURIComponent(id)}`);
@@ -399,9 +290,13 @@ function modal(title, html) {
   icons();
 }
 
-for (const id of ["window", "band", "profile"]) $(id).onchange = refresh;
-$("show-observations").onchange = () => drawFixes($("profile").value);
-$("show-receivers").onchange = () => state.selected?.observation && selectObservation(state.selected.observation);
+for (const id of ["window", "band", "profile"]) $(id).onchange = () => { resultLimits.clear(); refresh(); };
+$("search").oninput = () => { resultLimits.clear(); drawLists($("profile").value); updateOverview(); };
+$("show-observations").onchange = drawSingles;
+$("show-receivers").onchange = () => { drawSelectionLayers(); placeLabels(); };
+$("map").addEventListener("keydown", e => { if (e.key === "Escape" && state.selected) closeInspection(); });
+$("inspector").addEventListener("keydown", e => { if (e.key === "Escape") closeInspection(); });
+$("new-observations").onclick = closeInspection;
 $("help").onclick = () =>
   modal("Method and limits", `<p>Every position comes from <b>our own IQ</b>: the same transmission recorded by several receivers whose clocks are GNSS-disciplined (KiwiSDR, GPSDO/PPS nodes) or synchronized from reference emitters. Differences in arrival time constrain the transmitter; nothing else (no spot feeds, no self-reported locations) is a solver input.</p>
   <ul><li><b>FT8</b>: decoded locally; each receiver is timed against the waveform rebuilt from the decoded message. The locator in a message is used only to measure accuracy afterwards.</li>

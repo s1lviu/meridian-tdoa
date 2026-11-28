@@ -10,6 +10,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { createServer } from "node:net";
 import { join, resolve } from "node:path";
+import { checkMapResults } from "./map-results.mjs";
 
 const repo = resolve(new URL("..", import.meta.url).pathname);
 const binary = resolve(process.argv[2] || "target/debug/meridian-tdoa");
@@ -120,7 +121,7 @@ try {
   await page.locator("#track-list li button").first().click();
   await page.locator("#inspector").waitFor({ state: "visible" });
   assert.match(await page.locator("#inspector").innerText(), /Fused fixes/);
-  assert.ok((await page.locator("path.leaflet-interactive").count()) >= 1);
+  assert.equal(await page.locator("path.selected-track").count(), 1);
   ok("live: own-node detections located, registered as a track and inspectable");
   await page.locator("#inspector .link").first().click();
   try {
@@ -134,6 +135,7 @@ try {
   assert.equal(await page.locator("#inspector .rx-row").count(), 5);
   ok("observation inspector: located, five receivers, pair delays");
   await page.screenshot({ path: join(evidence, "live.png") });
+  await page.locator("#inspector-close").click();
   await page.unroute("**/api/monitor");
 
   await sendBeacon("beacon-43");
@@ -167,6 +169,10 @@ try {
   assert.notEqual(layout.status, "none");
   await mobile.screenshot({ path: join(evidence, "mobile.png") });
   ok("390 px layout: nothing wider than the screen, status line visible");
+  for (const phone of [false, true]) {
+    await checkMapResults(browser, base, evidence, phone);
+    ok((phone ? "390 px" : "desktop") + ": paged results, grouped labels, focus and motion, both ambiguous regions, optional globe and date-line fit");
+  }
   assert.deepEqual(errors, []);
   ok("no page errors");
   writeFileSync(join(evidence, "browser-tests.json"), JSON.stringify({ executed_at: new Date().toISOString(), checks }, null, 1));
