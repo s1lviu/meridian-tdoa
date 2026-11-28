@@ -4,6 +4,8 @@
 
 For a host that already serves other sites with Apache and certbot. Meridian runs as one container bound to `127.0.0.1`, and Apache proxies the public hostname to it.
 
+The public map uses `https://meridian.145500.xyz/` as its canonical address. For an independent public installation, replace this origin in `web/index.html`, `web/robots.txt` and `web/sitemap.xml` before building the image.
+
 Prepare the host once, as root:
 
 ```sh

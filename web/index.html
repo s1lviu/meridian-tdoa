@@ -1,13 +1,45 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" prefix="og: https://ogp.me/ns#">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Meridian TDoA</title>
-    <meta name="description" content="Transmitters located from our own SDR captures by time difference of arrival." />
+    <title>Live Radio Transmitter Map | Meridian TDoA</title>
+    <meta name="description" content="Explore live FT8 and other radio signals on a world map. Meridian estimates transmitter locations from arrival times measured by synchronized SDRs." />
     <meta name="author" content="Silviu YO6SAY" />
+    <meta name="robots" content="max-image-preview:large" />
+    <meta name="theme-color" content="#0b1218" />
+    <link rel="canonical" href="https://meridian.145500.xyz/" />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Meridian TDoA" />
+    <meta property="og:locale" content="en_US" />
+    <meta property="og:url" content="https://meridian.145500.xyz/" />
+    <meta property="og:title" content="Live radio transmitter map" />
+    <meta property="og:description" content="Explore FT8 callsigns and possible transmitter locations from synchronized SDRs." />
+    <meta property="og:image" content="https://meridian.145500.xyz/meridian-radio-map-v1.jpg" />
+    <meta property="og:image:type" content="image/jpeg" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="Meridian TDoA live radio transmitter map, with a radar icon over a globe centered on the Atlantic." />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Live radio transmitter map | Meridian TDoA" />
+    <meta name="twitter:description" content="Explore FT8 callsigns and possible transmitter locations from synchronized SDRs." />
+    <meta name="twitter:image" content="https://meridian.145500.xyz/meridian-radio-map-v1.jpg" />
+    <meta name="twitter:image:alt" content="Meridian TDoA live radio transmitter map, with a radar icon over a globe centered on the Atlantic." />
+
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "WebSite",
+        "name": "Meridian TDoA",
+        "alternateName": "Meridian",
+        "url": "https://meridian.145500.xyz/"
+      }
+    </script>
+    <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48 96x96" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" sizes="180x180" />
     <link rel="stylesheet" href="/vendor/leaflet/leaflet.css" />
-    <link rel="stylesheet" href="/style.css" />
+    <link rel="stylesheet" href="/style.css?v=30b9f7c6" />
     <script defer src="/vendor/leaflet/leaflet.js"></script>
     <script defer src="/vendor/lucide.js"></script>
     <script defer src="/results.js"></script>
@@ -17,7 +49,7 @@
   </head>
   <body>
     <header class="topbar">
-      <div class="brand"><i data-lucide="radar"></i><span>Meridian</span><small>TDoA</small></div>
+      <h1 class="brand"><i data-lucide="radar" aria-hidden="true"></i><span>Meridian</span> <small>TDoA</small></h1>
       <div class="status-line">
         <div class="status" id="status" role="status" aria-live="polite">Connecting…</div>
         <span id="next-window" class="next-window" role="timer" hidden></span>
@@ -25,6 +57,13 @@
       <button id="help" class="icon-button" title="Method and limits" aria-label="Method and limits"><i data-lucide="circle-help"></i></button>
     </header>
 
+    <noscript>
+      <section class="map-intro">
+        <h2>Live radio transmitter map</h2>
+        <p>Meridian compares the arrival times of radio signals at synchronized software-defined receivers. The map shows possible transmitter regions and the receivers that heard each signal.</p>
+        <p>Enable JavaScript to search FT8 callsigns and explore live observations.</p>
+      </section>
+    </noscript>
     <main class="layout">
       <section class="map-card" aria-label="Transmitter map">
         <div id="map" aria-label="Transmitter locations and possible regions"></div>
@@ -53,7 +92,7 @@
 
       <aside class="panel" aria-label="Controls and results">
         <section id="inspector" class="inspector" aria-label="Selected map result" hidden></section>
-        <h1 class="rail-title">Signal results</h1>
+        <h2 class="rail-title">Signal results</h2>
         <label class="search"><i data-lucide="search"></i><input type="search" id="search" aria-label="Find a callsign or frequency" placeholder="Find callsign or frequency" /></label>
         <div class="filters">
           <label>Window
