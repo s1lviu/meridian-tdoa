@@ -27,7 +27,9 @@ button svg { width: 16px; height: 16px; }
 select, input[type="text"], input[type="password"], input[type="url"] { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; width: 100%; }
 
 .topbar { display: flex; align-items: center; gap: 16px; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 1000; }
-.brand { display: flex; align-items: center; gap: 8px; font-weight: 650; letter-spacing: .02em; }
+.brand { display: flex; align-items: center; gap: 8px; margin: 0; font-size: inherit; font-weight: 650; letter-spacing: .02em; }
+.map-intro { max-width: 38rem; margin: 3rem auto; padding: 0 1.25rem; }
+body:has(.map-intro) :is(.layout, .status-line, #help) { display: none; }
 .brand svg { color: var(--accent); }
 .brand small { color: var(--muted); font-weight: 500; }
 .status-line { margin-left: auto; display: flex; align-items: center; gap: 14px; min-width: 0; }

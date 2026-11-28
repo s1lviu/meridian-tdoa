@@ -52,6 +52,42 @@ try {
     await new Promise((r) => setTimeout(r, 100));
   }
   assert.equal(await (await fetch(base + "/api/monitor")).json(), null, "no scheduler configured");
+  const crawler = await browser.newPage({ javaScriptEnabled: false });
+  await crawler.goto(base);
+  const tags = await crawler.locator("head meta[content]").evaluateAll(elements =>
+    Object.fromEntries(elements.map(el => [el.getAttribute("property") || el.name, el.content])));
+  const canonical = new URL(await crawler.locator('link[rel="canonical"]').getAttribute("href"));
+  const socialImage = new URL(tags["og:image"]);
+  const site = JSON.parse(await crawler.locator('script[type="application/ld+json"]').textContent());
+  assert.equal(canonical.protocol, "https:");
+  assert.equal(tags["og:url"], canonical.href);
+  assert.equal(site["@type"], "WebSite");
+  assert.equal(site.url, canonical.href);
+  assert.equal(site.name, tags["og:site_name"]);
+  assert.equal(socialImage.origin, canonical.origin);
+  assert.equal(tags["twitter:card"], "summary_large_image");
+  assert.equal(tags["twitter:image"], socialImage.href);
+  for (const key of ["description", "og:title", "og:description", "og:image:alt", "twitter:image:alt"]) {
+    assert.ok(tags[key]?.trim(), key);
+  }
+  assert.ok(await crawler.getByRole("heading", { name: "Live radio transmitter map" }).isVisible());
+  assert.equal(await crawler.locator(".layout").isVisible(), false);
+  // Request the published asset path from this test server, keeping CI offline.
+  const imageResponse = await crawler.goto(new URL(socialImage.pathname, base).href);
+  assert.equal(imageResponse.status(), 200);
+  assert.equal(imageResponse.headers()["content-type"], tags["og:image:type"]);
+  assert.ok((await imageResponse.body()).length < 600_000);
+  const dimensions = await crawler.locator("img").evaluate(async img => {
+    await img.decode();
+    return [img.naturalWidth, img.naturalHeight];
+  });
+  assert.deepEqual(dimensions, [1200, 630]);
+  assert.deepEqual(dimensions, [Number(tags["og:image:width"]), Number(tags["og:image:height"])]);
+  assert.ok((await (await fetch(base + "/robots.txt")).text()).includes("Sitemap: " + new URL("sitemap.xml", canonical).href));
+  assert.ok((await (await fetch(base + "/sitemap.xml")).text()).includes(`<loc>${canonical.href}</loc>`));
+  await crawler.close();
+  ok("search metadata and share image are readable without JavaScript and match the served files");
+
   const page = await browser.newPage({ viewport: { width: 1440, height: 950 } });
   const errors = [];
   page.on("pageerror", (e) => errors.push(e.message));
