@@ -2,76 +2,85 @@
 
 [Back to Meridian](../README.md)
 
-## Run natively
-
-Requirements: the tested Rust toolchain is **1.100.0**, a C toolchain for dependencies, and Python 3 for evaluation. Node is required for frontend dependency maintenance and browser tests. Run commands from the repository root.
+Requirements: Rust 1.100.0, a C compiler (ft8_lib and SQLite are compiled by `build.rs`/`rusqlite`), Python 3 (optional KiwiClient transport and integration tests), Node 22 with Playwright for browser tests.
 
 ```sh
-./scripts/start.sh
+./scripts/start.sh                       # build and serve with config/app.json (replay only)
+MERIDIAN_CONFIG=config/production.json cargo run --release --locked
 ```
 
-The script builds the application and starts the server. Open [localhost:3000](http://localhost:3000/?replay=1) for the included recording.
+`MERIDIAN_CONFIG` selects the configuration; `PORT` overrides the listen address; `MERIDIAN_DIRECTORY_OFFLINE=1` disables directory refreshes.
 
-`MERIDIAN_CONFIG` selects a configuration file; `PORT` overrides its listening port and binds `0.0.0.0`. The default `config/app.json` disables live capture. To install the native capture client:
+## Commands
 
 ```sh
-./scripts/setup_kiwiclient.sh
-MERIDIAN_CONFIG=config/live-verified.json \
-  MERIDIAN_ADMIN_TOKEN_FILE=/path/to/protected/token ./scripts/start.sh
+meridian-tdoa                                    # server
+meridian-tdoa capture TARGET [--sources ID,… | --directory N [--near LAT,LON]]
+meridian-tdoa process data/captures/<id>/manifest.json [FAULT_RECEIVER]
+meridian-tdoa ingest DIR [--profile correlated_v1|ft8_v1] [--center HZ]
+meridian-tdoa calibrate                          # stored DCF77 vs the PTB position (post hoc)
+meridian-tdoa calibrate ft8                      # stored FT8 fixes vs the locators stations sent
+meridian-tdoa import [OBSERVATIONS.json]           # import local history without serving
+meridian-tdoa stats [START_UTC END_UTC]            # complete interval statistics
+meridian-node capture SETTINGS.json OUT           # optional SoapySDR hardware input
+meridian-tdoa discover                           # refresh the receiver directory
+meridian-node watch DIR --server URL --node ID --token-file FILE [--once]
 ```
 
-The token must contain at least 24 characters. The API does not expose it and the browser does not persist it. The Docker configuration uses `python3`; the native live configuration uses `.venv/bin/python`. See [deployment and operation](PRODUCTION.md) for receiver configuration and capture requirements.
+Only the invocation without a subcommand starts the server.
 
-## Run the checks
+## Checks
 
 ```sh
 cargo fmt -- --check
-cargo test --locked
-./scripts/validate_data.sh
-python3 tests/transport.py
-npm ci
-npx playwright install --with-deps chromium
-# Start the server in another terminal, then:
-CHROMIUM_PATH="$(node --input-type=module -e 'import {chromium} from "playwright"; process.stdout.write(chromium.executablePath())')" npm run test:browser
+cargo test --locked                                   # unit, synthetic and real-IQ tests
+# Optional GPSDO driver path needs pkg-config, a C++17 compiler and libSoapySDR.
+cargo build --locked --features soapy --bin meridian-node
+python3 tests/soapy.py target/debug/meridian-node     # software device through the actual library
+python3 tests/transport.py                            # KiwiClient wrapper: one attempt, no redirects
+python3 tests/detections.py target/debug/meridian-tdoa   # node detections through a real server
+CHROMIUM_PATH=… npm run test:browser                  # map against a real server on controlled data
+docker build -t meridian-ci . && sh tests/container.sh meridian-ci  # offline Linux release and persistent volume
 ```
 
-Set `BASE_URL` if the test server is not at `http://127.0.0.1:3000`. `tests/release.mjs` additionally exercises authenticated reprocessing against a running server and requires `MERIDIAN_ADMIN_TOKEN` or `.secrets/runtime.env`.
+`tests/container.sh` runs the image non-root with a read-only root, 1 GiB memory and 128 pids, reprocesses the bundled DCF77 IQ and replaces the container on the same volume. It passed on linux/arm64 and linux/amd64 images on 27–28 November 2026 (UTC), and the Rust suite passed inside linux/amd64. To build linux/amd64 on Apple Silicon, use Rosetta binfmt in the Linux VM and remove `qemu-user`. BuildKit otherwise runs the Rust toolchain under QEMU, where `rustc -vV` crashes with SIGSEGV.
 
-The [CI workflow](../.github/workflows/ci.yml) uses the bundled real recording and a fixed directory snapshot. Tests do not acquire new RF from public SDRs. The four-receiver geometry test is synthetic and is not evidence of live accuracy. See [the validation report](VALIDATION.md) for the measured results and interpretation.
+What the Rust tests establish (no public receiver is contacted):
 
-## Recording format and capture configuration
+| Area | Test |
+|---|---|
+| Kiwi parsing and GNSS | truncation, stale solutions, time jumps on the real 2020 recording |
+| DCF77 | real IQ matches the PTB code; carrier and noise do not; a failing receiver is withheld, the capture proceeds |
+| Resampling | Kaiser sinc keeps a 4.5 kHz tone within 10⁻³ where linear interpolation errs by >0.1 |
+| Occupancy | CFAR finds a narrow carrier and a 300 Hz signal; noise alone gives nothing |
+| Correlation | sub-windows survive a 0.5 Hz Doppler offset that defeats coherent 2 s windows |
+| Solver | Monte Carlo 95% coverage ≥90% for per-receiver and pair noise (measured 60/60); three receivers keep both mirror solutions |
+| FT8 | upstream WSJT-X reference recordings decode (4/5, 16/24); synthesized waveforms round-trip; decoder lag measured |
+| Matched filter | rms timing error / jackknife σ = 1.04 over 40 noisy trials |
+| FT8 TDoA | five-receiver synthetic Kiwi network: 0.64 km error |
+| SigMF | anchors with 2 ppm clock error, channelization, nanosecond time alignment; unknown emitter located 0.08 km from truth; ingest builds a hashed manifest |
+| Edge nodes | five SigMF nodes report FT8 arrivals; server-side association locates within 0.81 km |
+| Clock sync | free-running clocks synchronized from a reference emitter; target within 29 m |
+| Storage | SQLite queries, bundle replacement, pruning, interrupted jobs; retention deletes unverified IQ, evicts the oldest under quota |
+| Tracks | covariance intersection, gating, duplicate observations |
 
-Only verified **approximately 12 kHz Kiwi IQ WAV** is supported. Ordinary audio streams and unverified WebSDR/OpenWebRX protocols are not used for TDoA. Captures use 3–8 receivers, 10–120 seconds and at most 64 MiB of IQ per processed set, subject to stricter source limits.
+Synthetic tests are geometry and algorithm checks, not evidence of live accuracy; see [VALIDATION.md](VALIDATION.md) for measured results.
 
-Published `ext_api` and `tdoa_ch` policies, band availability, antenna metadata and preflight GNSS are rechecked before acquisition. Synchronization is then checked in the actual IQ blocks.
-
-The DCF77 profile verifies the PTB PRN modulation before automatic processing. Other targets require capture-specific eligibility evidence through the [review API](API.md). The 1 km antenna-position allowance is a declared assumption, not a surveyed accuracy. Timing and uncertainty limitations are documented in [VALIDATION.md](VALIDATION.md).
-
-## Import a recording
-
-Place another real recording under `data/datasets/<name>/manifest.json`, using the [bundled manifest](../data/recordings/manifest.json) as the schema example.
-
-- Keep paths within the dataset directory and preserve original IQ hashes.
-- Use `mode: "replay"` to distinguish an archived recording from a live capture.
-- Set `emission_verified: true` only after checking provenance; `identity` may remain `null`.
-
-```sh
-cargo run --locked -- process data/datasets/name/manifest.json
-# Restart the server to discover an imported dataset and result.
-```
-
-## Project layout
+## Layout
 
 | Path | Responsibility |
 |---|---|
-| `src/kiwi.rs`, `src/dsp.rs` | Kiwi WAV parsing, GNSS validation, detection and correlation |
-| `src/geo.rs`, `src/pipeline.rs` | TDoA search, geometry, ambiguity and uncertainty regions |
-| `src/capture.rs`, `src/protocol.rs` | Independent capture and RF eligibility verification |
-| `src/directory.rs`, `src/store.rs` | Public source metadata and durable single-writer state |
-| `src/main.rs`, `web/` | Axum API and responsive Leaflet interface |
-| `data/recordings/`, `evidence/` | Original real IQ, provenance and timestamped test evidence |
-| `docs/API.md`, `docs/PRODUCTION.md` | API contract and operational setup |
+| `src/kiwi.rs`, `src/sigmf.rs`, `src/iq.rs` | Timestamped IQ from KiwiSDR WAV or SigMF |
+| `src/dsp.rs`, `src/toa.rs` | Resampling, occupancy (CFAR), correlation, matched-filter arrival time |
+| `src/ft8.rs`, `src/ft8_tdoa.rs`, `third_party/ft8_lib/` | FT8 decoding and synthesis; FT8 TDoA profile; edge processing |
+| `src/protocol.rs`, `src/ibp.rs`, `src/channel.rs` | DCF77, IBP and unknown-emitter profiles |
+| `src/geo.rs`, `src/pipeline.rs` | WGS84 GLS solver, uncertainty, receiver subsets |
+| `src/tracks.rs`, `src/sync.rs` | Emitter registry; reference-emitter clock synchronization |
+| `src/db.rs`, `src/retention.rs` | SQLite store, fair-use ledger, retention |
+| `src/capture.rs`, `src/directory.rs`, `src/main.rs`, `src/monitor.rs` | Acquisition, directory, API, scheduler |
+| `src/bin/meridian-node.rs` | Edge node agent |
+| `web/` | Map |
 
 ## Contributing
 
-Follow [CONTRIBUTING.md](../CONTRIBUTING.md). Keep original recordings and their provenance intact, and keep known transmitter coordinates confined to post-hoc evaluation.
+Keep the measurement contract in [CONTRIBUTING.md](../CONTRIBUTING.md): positions come only from our own timing measurements; known transmitter positions and sent locators belong only in post-hoc evaluation and calibration.

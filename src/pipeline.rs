@@ -1,11 +1,16 @@
-use crate::{dsp, geo, kiwi, model::*};
+use crate::{dsp, geo, model::*};
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, Datelike, Duration, Utc};
 use sha2::{Digest, Sha256};
 use std::{collections::HashSet, fs, path::Path};
 
+/// Receivers per capture. The fully-correlated subset search is exhaustive (2^n subsets).
+pub const MAX_RECEIVERS: usize = 12;
+
 pub fn checksum(path: &Path) -> Result<String> {
-    Ok(format!("{:x}", Sha256::digest(fs::read(path)?)))
+    let mut hash = Sha256::new();
+    std::io::copy(&mut fs::File::open(path)?, &mut hash)?;
+    Ok(format!("{:x}", hash.finalize()))
 }
 pub fn valid_position(p: Point) -> bool {
     p.lat.is_finite() && p.lon.is_finite() && p.lat.abs() <= 90. && p.lon.abs() <= 180.
@@ -21,7 +26,7 @@ pub fn validate_manifest(m: &Manifest) -> Result<()> {
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
             && m.frequency_hz > 0.
-            && m.frequency_hz <= 30e6,
+            && m.frequency_hz <= 6e9,
         "Invalid manifest/frequency"
     );
     ensure!(
@@ -32,14 +37,28 @@ pub fn validate_manifest(m: &Manifest) -> Result<()> {
         [
             "public_beacon",
             "participating_amateur",
-            "public_time_reference"
+            "public_time_reference",
+            "amateur_digital",
+            "monitored_channel"
         ]
         .contains(&m.kind.as_str()),
         "Target is not eligible"
     );
+    let single_receiver_ok = m.mode == "live"
+        && ((m.capture_profile.as_deref() == Some(crate::ibp::PROFILE)
+            && m.kind == "public_beacon")
+            || (m.capture_profile.as_deref() == Some(crate::ft8_tdoa::PROFILE)
+                && m.kind == "amateur_digital"));
+    let minimum_receivers = if single_receiver_ok {
+        1
+    } else if m.capture_profile.as_deref() == Some(crate::channel::PROFILE) {
+        2
+    } else {
+        3
+    };
     ensure!(
-        (3..=8).contains(&m.receivers.len()),
-        "3–8 receivers are required"
+        (minimum_receivers..=MAX_RECEIVERS).contains(&m.receivers.len()),
+        "Invalid receiver count for this capture profile"
     );
     ensure!(valid_evidence(&m.provenance), "Missing provenance");
     DateTime::parse_from_rfc3339(&m.capture_utc).context("Invalid UTC timestamp")?;
@@ -82,6 +101,10 @@ pub fn validate_manifest(m: &Manifest) -> Result<()> {
 /// The solver has no parameter for known transmitter coordinates. Evaluation is a separate command.
 pub fn process(manifest_path: &Path, fault_receiver: Option<&str>) -> Result<Emission> {
     let m: Manifest = serde_json::from_slice(&fs::read(manifest_path)?)?;
+    ensure!(
+        m.capture_profile.as_deref() != Some(crate::ibp::PROFILE),
+        "Process IBP captures as individual UTC slots"
+    );
     validate_manifest(&m)?;
     ensure!(
         m.emission_verified,
@@ -112,8 +135,12 @@ pub fn process(manifest_path: &Path, fault_receiver: Option<&str>) -> Result<Emi
             fs::metadata(&p)?.len() <= 64 * 1024 * 1024,
             "IQ file too large"
         );
-        ensure!(checksum(&p)? == r.sha256, "SHA256 nu corespunde: {}", r.id);
-        let mut t = kiwi::read(&p)?;
+        ensure!(
+            checksum(&crate::iq::hashed_file(&p))? == r.sha256,
+            "SHA-256 mismatch: {}",
+            r.id
+        );
+        let mut t = crate::iq::read(&p, &m)?;
         if Some(r.id.as_str()) == fault_receiver {
             t.max_age = 255;
             t.sync_error = Some("TEST: injected GNSS loss; RF samples are unchanged".into());
@@ -143,7 +170,7 @@ pub fn process(manifest_path: &Path, fault_receiver: Option<&str>) -> Result<Emi
         (week.timestamp() as f64 + start - m.gps_utc_offset_s as f64 - date.timestamp() as f64)
             .abs()
             < 180.,
-        "Semaine GPS incompatible cu ancora UTC"
+        "GPS week is inconsistent with the UTC capture anchor"
     );
     let overlap = end - start;
     let mut e = Emission {
@@ -174,6 +201,8 @@ pub fn process(manifest_path: &Path, fault_receiver: Option<&str>) -> Result<Emi
         detected: false,
         spectrum: vec![],
         processed_at: Utc::now().to_rfc3339(),
+        reference: None,
+        excluded: m.rejected_receivers.clone(),
     };
     let fs = 12000.;
     let n = (overlap.max(0.).min(120.) * fs) as usize;
@@ -205,6 +234,7 @@ pub fn process(manifest_path: &Path, fault_receiver: Option<&str>) -> Result<Emi
     if overlap < 6. {
         e.detected = e.receivers.iter().any(|r| r.signal_score_db >= 15.);
         e.reason = Some("Captures lack at least 6 s of overlap on the same GNSS timebase".into());
+        e.reference = crate::protocol::reference_view(&e, &root);
         return Ok(e);
     }
     for i in 0..tracks.len() {
@@ -228,10 +258,22 @@ pub fn process(manifest_path: &Path, fault_receiver: Option<&str>) -> Result<Emi
         .receivers
         .iter()
         .any(|r| r.signal_score_db >= 15. || r.confirmed);
+    locate_receptions(&mut e);
+    if !e.detected {
+        e.status = "no_detection".into();
+        e.reason=Some("No emission detected by the spectral/correlation detector in this recorded channel and interval; this does not describe the entire band or map".into());
+    }
+    e.reference = crate::protocol::reference_view(&e, &root);
+    Ok(e)
+}
+
+pub(crate) fn locate_receptions(e: &mut Emission) {
     // Largest fully correlated synchronized subset; other confirmed receptions remain visible.
     let mut best = vec![];
-    for mask in 0usize..(1 << tracks.len()) {
-        let ix: Vec<_> = (0..tracks.len()).filter(|i| mask & (1 << i) != 0).collect();
+    for mask in 0usize..(1 << e.receivers.len()) {
+        let ix: Vec<_> = (0..e.receivers.len())
+            .filter(|i| mask & (1 << i) != 0)
+            .collect();
         if ix.len() <= best.len()
             || ix
                 .iter()
@@ -241,9 +283,11 @@ pub fn process(manifest_path: &Path, fault_receiver: Option<&str>) -> Result<Emi
         }
         if ix.iter().enumerate().all(|(k, &i)| {
             ix[k + 1..].iter().all(|&j| {
-                e.pairs
-                    .iter()
-                    .any(|p| p.a == m.receivers[i].id && p.b == m.receivers[j].id && p.accepted)
+                e.pairs.iter().any(|p| {
+                    p.a == e.receivers[i].receiver.id
+                        && p.b == e.receivers[j].receiver.id
+                        && p.accepted
+                })
             })
         }) {
             best = ix;
@@ -253,21 +297,26 @@ pub fn process(manifest_path: &Path, fault_receiver: Option<&str>) -> Result<Emi
         for &i in &best {
             e.receivers[i].used = true;
         }
-        // Pairwise cycle closure detects mutually incompatible delays.
-        let dt = |a: usize, b: usize| {
+        // Pairwise cycle closure detects grossly incompatible delays (5σ, at least 250 µs).
+        let pair = |a: usize, b: usize| {
             e.pairs
                 .iter()
-                .find(|p| p.a == m.receivers[a].id && p.b == m.receivers[b].id)
+                .find(|p| p.a == e.receivers[a].receiver.id && p.b == e.receivers[b].receiver.id)
                 .unwrap()
-                .delay_us
         };
         let mut consistent = true;
         for a in 0..best.len() {
             for b in a + 1..best.len() {
                 for c in b + 1..best.len() {
-                    if (dt(best[a], best[b]) + dt(best[b], best[c]) - dt(best[a], best[c])).abs()
-                        > 250.
-                    {
+                    let (ab, bc, ac) = (
+                        pair(best[a], best[b]),
+                        pair(best[b], best[c]),
+                        pair(best[a], best[c]),
+                    );
+                    let limit = (5.
+                        * (ab.sigma_us.powi(2) + bc.sigma_us.powi(2) + ac.sigma_us.powi(2)).sqrt())
+                    .max(250.);
+                    if (ab.delay_us + bc.delay_us - ac.delay_us).abs() > limit {
                         consistent = false;
                     }
                 }
@@ -276,12 +325,16 @@ pub fn process(manifest_path: &Path, fault_receiver: Option<&str>) -> Result<Emi
         if consistent {
             match geo::locate(&e.receivers, &e.pairs) {
                 Ok(mut solutions) => {
-                    if solutions.len() == 1 {
+                    if solutions.len() == 1 && best.len() >= 4 {
                         e.estimate = solutions.pop();
                         e.status = "located".into();
                     } else {
                         e.hypotheses = solutions;
-                        e.reason=Some("Global search found two or more compatible regions. Position undetermined; an additional receiver or an independently justified search domain is required.".into());
+                        e.reason = Some(if best.len() < 4 {
+                            "Three receivers cannot exclude the mirror solution on the globe. Position undetermined; a fourth synchronized receiver is required.".into()
+                        } else {
+                            "Global search found two or more compatible regions. Position undetermined; an additional receiver or an independently justified search domain is required.".into()
+                        });
                     }
                 }
                 Err(err) => e.reason = Some(err.to_string()),
@@ -300,11 +353,6 @@ pub fn process(manifest_path: &Path, fault_receiver: Option<&str>) -> Result<Emi
             r.used = false;
         }
     }
-    if !e.detected {
-        e.status = "no_detection".into();
-        e.reason=Some("No emission detected by the spectral/correlation detector in this recorded channel and interval; this does not describe the entire band or map".into());
-    }
-    Ok(e)
 }
 
 pub fn save(result: &Emission, dir: &Path) -> Result<()> {

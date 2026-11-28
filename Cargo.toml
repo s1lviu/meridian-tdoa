@@ -1,8 +1,20 @@
 [package]
 name = "meridian-tdoa"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
+default-run = "meridian-tdoa"
+
+[features]
+soapy = ["dep:pkg-config", "dep:tempfile"]
+
+[[bin]]
+name = "meridian-tdoa"
+path = "src/main.rs"
+
+[[bin]]
+name = "meridian-node"
+path = "src/bin/meridian-node.rs"
 
 [dependencies]
 anyhow = "1"
@@ -13,9 +25,21 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 tokio = { version = "1", features = ["full"] }
+futures-core = "0.3"
+tokio-stream = { version = "0.1", features = ["sync"] }
 tower-http = { version = "0.6", features = ["fs", "limit", "trace"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots"] }
+geographiclib-rs = "0.2.7"
+libm = "0.2"
+rusqlite = { version = "0.43", features = ["bundled"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "blocking", "json"] }
 uuid = { version = "1", features = ["v4"] }
+tempfile = { version = "3", optional = true }
+tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }
+futures-util = { version = "0.3.34", features = ["sink"] }
+
+[build-dependencies]
+cc = "1"
+pkg-config = { version = "0.3", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

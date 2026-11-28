@@ -6,6 +6,7 @@ node_modules
 .env
 vendor
 data/captures
+data/results/live-*.json
 data/datasets
 data/jobs
 data/state
@@ -13,3 +14,7 @@ evidence
 *.tar.gz
 !third_party/*.tar.gz
 __pycache__
+
+.codegraph
+data/meridian.sqlite*
+data/inbox*

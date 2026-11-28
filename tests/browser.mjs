@@ -1,188 +1,136 @@
+// Browser checks of the map against a real server process started here, on controlled data:
+// the bundled 2020 DCF77 recording (replay) and simulated own-node detections (live).
+// Usage: CHROMIUM_PATH=… node tests/browser.mjs path/to/meridian-tdoa
 import { chromium } from "playwright";
 import assert from "node:assert/strict";
-import { writeFileSync } from "node:fs";
-const browser = await chromium.launch({
-  executablePath: process.env.CHROMIUM_PATH || "/usr/bin/chromium",
-  headless: true,
-  args: ["--no-sandbox", "--disable-dev-shm-usage"],
-});
-const page = await browser.newPage({
-  viewport: { width: 1440, height: 1050 },
-  deviceScaleFactor: 1,
-});
-const errors = [];
-page.on("pageerror", (e) => errors.push(e.message));
-const requests = [];
-page.on("request", (r) => {
-  if (r.url().includes("/api/emissions?")) requests.push(r.url());
-});
-const base = process.env.BASE_URL || "http://127.0.0.1:3000";
+import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
+import { cpSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { createServer } from "node:net";
+import { join, resolve } from "node:path";
+
+const repo = resolve(new URL("..", import.meta.url).pathname);
+const binary = resolve(process.argv[2] || "target/debug/meridian-tdoa");
+const work = mkdtempSync(join(tmpdir(), "meridian-browser-"));
+symlinkSync(join(repo, "web"), join(work, "web"));
+mkdirSync(join(work, "data/results"), { recursive: true });
+cpSync(join(repo, "data/recordings"), join(work, "data/recordings"), { recursive: true });
+for (const f of ["dcf77-20200813.json", "dcf77-20200813-sync-loss.json"]) cpSync(join(repo, "data/results", f), join(work, "data/results", f));
+const nodes = { n0: [44.4, 26.1], n1: [44.55, 25.8], n2: [44.2, 25.9], n3: [44.45, 26.45], n4: [44.25, 26.3] };
+const tokens = Object.fromEntries(Object.keys(nodes).map((n) => [n, `token-${n}-${"y".repeat(24)}`]));
+const config = JSON.parse(readFileSync(join(repo, "config/app.json"), "utf8"));
+config.nodes = Object.entries(nodes).map(([id, [lat, lon]]) => ({
+  id, label: `simulated ${id}`, position: { lat, lon }, disciplined: true,
+  position_evidence: { url: "https://example.org/simulated", note: "simulated node" },
+  token_sha256: createHash("sha256").update(tokens[id]).digest("hex"),
+}));
+const available = createServer();
+await new Promise((resolve, reject) => available.once("error", reject).listen(0, "127.0.0.1", resolve));
+const port = available.address().port;
+await new Promise((resolve) => available.close(resolve));
+config.listen = `127.0.0.1:${port}`;
+writeFileSync(join(work, "config.json"), JSON.stringify(config));
+const base = `http://${config.listen}`;
+const env = { ...process.env, MERIDIAN_CONFIG: "config.json", MERIDIAN_DIRECTORY_OFFLINE: "1" };
+delete env.PORT;
+const server = spawn(binary, [], { cwd: work, env, stdio: "ignore" });
 const checks = [];
-const ok = (label) => {
-  checks.push(label);
-  console.log("PASS", label);
+const ok = (label) => { checks.push(label); console.log("PASS", label); };
+const C = 299792.458;
+const dist = ([a, b], [c, d]) => {
+  const p = (a * Math.PI) / 180, q = (c * Math.PI) / 180;
+  const h = Math.sin((q - p) / 2) ** 2 + Math.cos(p) * Math.cos(q) * Math.sin((((d - b) * Math.PI) / 180) / 2) ** 2;
+  return 6371.0088 * 2 * Math.asin(Math.min(1, Math.sqrt(h)));
 };
+const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH || undefined, headless: true, args: ["--no-sandbox"] });
 try {
-  await page.goto(base + "/?replay=1", { waitUntil: "networkidle" });
-  await page.locator("#inspector").waitFor({ state: "visible" });
-  assert.match(
-    await page.locator("#inspector").innerText(),
-    /Position undetermined/,
-  );
-  assert.equal(await page.locator(".rx-row").count(), 3);
-  assert.equal(await page.locator(".leaflet-marker-icon .tx-icon").count(), 0);
-  assert.match(
-    await page.locator("#mode-badge").innerText(),
-    /REAL RECORDING/,
-  );
-  ok(
-    "real recording: ambiguous hypotheses, no unique transmitter marker, three receptions",
-  );
-  await page.screenshot({ path: "evidence/desktop.png", fullPage: true });
-  const before = requests.length;
-  await page.evaluate(() => map.setView([50.0123, 9.0331], 11));
-  await page.waitForTimeout(600);
-  assert.ok(requests.length > before);
-  assert.equal(await page.locator("#emission-count").innerText(), "1");
-  assert.equal(await page.locator("#inspector .outside").count(), 3);
-  ok(
-    "zoom queries viewport; region intersects even when centroid/receivers outside; selected receiver list preserved",
-  );
-  await page.evaluate(() => map.setView([30, 30], 6));
-  await page.waitForTimeout(600);
-  assert.equal(await page.locator("#emission-count").innerText(), "0");
-  assert.equal(await page.locator(".rx-row").count(), 3);
-  ok(
-    "pan filters emissions while detail retains all confirmed receivers outside viewport",
-  );
-  await page.locator("#band").selectOption("20m");
-  await page.waitForTimeout(400);
-  assert.match(
-    await page.locator("#coverage-title").innerText(),
-    /Unmonitored interval/,
-  );
-  assert.equal(await page.locator("#emission-count").innerText(), "0");
-  ok("band filter returns unmonitored, not no-emission");
-  await page.locator("#reset").click();
-  await page.locator("#inspector").waitFor({ state: "visible" });
-  await page.locator("#end").fill("2020-08-13T06:00");
-  await page.locator("#apply").click();
-  assert.match(
-    await page.locator("#filter-error").innerText(),
-    /valid UTC interval/,
-  );
-  ok("invalid UTC interval rejected");
-  await page.locator("#reset").click();
-  await page.locator("#inspector").waitFor({ state: "visible" });
-  await page.locator("#proof").click();
-  await page.locator("#show-evaluation").click();
-  await page.waitForFunction(
-    () =>
-      document.querySelector("#modal-title").textContent ===
-      "Real-recording evaluation",
-  );
-  assert.match(await page.locator("#modal-content").innerText(), /1\.79 km/);
-  assert.match(
-    await page.locator("#modal-content").innerText(),
-    /global ambiguity/,
-  );
-  ok(
-    "post-hoc real-data error shown without choosing the known transmitter hypothesis",
-  );
-  await page.locator("#close-modal").click();
-  await page.locator("#test-sync").click();
-  await page.waitForFunction(
-    () =>
-      document
-        .querySelector("#mode-badge")
-        .textContent.includes("GNSS LOSS"),
-    {},
-    { timeout: 60000 },
-  );
-  await page.waitForFunction(() =>
-    document.querySelector("#inspector").textContent.includes("NO GNSS"),
-  );
-  assert.equal(await page.locator("#emission-count").innerText(), "0");
-  assert.match(
-    await page.locator("#inspector").innerText(),
-    /Position undetermined/,
-  );
-  assert.equal(await page.locator("#unlocated .emission-card").count(), 1);
-  await page.screenshot({ path: "evidence/sync-loss.png", fullPage: true });
-  ok(
-    "loss-of-sync result from actual IQ opens correctly, with no position or candidate area",
-  );
-  await page.locator("#mode-live").click();
-  await page.waitForTimeout(400);
-  assert.match(await page.locator("#mode-badge").innerText(), /^LIVE$/);
-  assert.match(
-    await page.locator("#coverage-title").innerText(),
-    /Unmonitored interval/,
-  );
-  await page.locator("#replay").click();
-  await page.locator("#modal").waitFor({ state: "visible" });
-  assert.match(
-    await page.locator("#modal-content").innerText(),
-    /Administrator token|No SDR operator/,
-  );
-  await page.locator("#close-modal").click();
-  ok("live and replay separated; capture requires administrator token");
-  const denied = await page.request.post(base + "/api/capture", {data: {target_id: "dcf77-validation"}});
-  assert.ok([401,403].includes(denied.status()));
-  const forced = await page.request.post(base + "/api/replay", {data: {dataset_id: "dcf77-20200813", force: true}});
-  assert.ok([401,403].includes(forced.status()));
-  ok("unauthenticated capture and forced DSP refused before starting work");
-  const catalog = await (await page.request.get(base + "/api/sources?limit=2")).json();
-  if (catalog.available) {
-    assert.ok(catalog.total > 100);
-    assert.ok(catalog.receivers.every(r => r.reception_confirmed === false));
-    await page.locator("#nav-sources").click();
-    await page.locator("#catalog-form").waitFor();
-    await page.locator("#catalog-search").fill("0cb2b7d6cd86");
-    await page.locator("#catalog-form button").click();
-    await page.waitForFunction(() => document.querySelectorAll("[data-source-id]").length === 1 && document.querySelector("#modal-content").textContent.includes("PE1NOD"));
-    assert.equal(await page.locator("[data-source-id]").count(),1);
-    await page.locator("#close-modal").click();
-    ok("real public catalog searchable, policy exclusions retained, metadata never presented as RF reception");
+  for (let i = 0; i < 100; i++) {
+    try { if ((await fetch(base + "/api/ready")).ok) break; } catch {}
+    await new Promise((r) => setTimeout(r, 100));
   }
-  const ready = await page.request.get(base + "/api/ready");
-  assert.equal(ready.status(),200);
-  assert.match(ready.headers()["content-security-policy"],/frame-ancestors 'none'/);
-  assert.equal(ready.headers()["x-content-type-options"],"nosniff");
-  ok("readiness and browser security headers present");
-  await page.locator("#mode-replay").click();
+  const page = await browser.newPage({ viewport: { width: 1440, height: 950 } });
+  const errors = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+
+  // Replay: the real 2020 recording has three receivers and therefore two mirror hypotheses.
+  const response = await page.goto(base + "/?replay=1", { waitUntil: "load" });
+  assert.match(response.headers()["content-security-policy"], /script-src 'self'/);
   await page.locator("#inspector").waitFor({ state: "visible" });
-  await page.setViewportSize({ width: 390, height: 844 });
-  await page.waitForTimeout(500);
-  assert.ok(
-    await page.evaluate(
-      () => document.documentElement.scrollWidth <= window.innerWidth,
-    ),
-  );
-  await page.screenshot({ path: "evidence/mobile.png", fullPage: true });
-  await page.locator("#proof").click();
-  assert.ok(await page.locator("#modal").isVisible());
-  await page.locator("#close-modal").click();
-  ok("390px responsive layout and modal interaction; no horizontal overflow");
+  assert.match(await page.locator("#mode-badge").innerText(), /REAL RECORDING/);
+  assert.match(await page.locator("#inspector").innerText(), /Position undetermined/);
+  assert.equal(await page.locator("#inspector .rx-row").count(), 3);
+  assert.equal(await page.locator("path.hypothesis-region").count(), 2);
+  assert.equal(await page.locator("path.fix-region").count(), 0);
+  ok("recording: two mirror hypotheses, no unique fix, three receivers listed");
+  await page.screenshot({ path: join(repo, "evidence/desktop.png") });
+
+  await page.locator("#sync-loss").click();
+  await page.waitForFunction(() => document.querySelector("#inspector")?.innerText.includes("Fewer than three"));
+  assert.equal(await page.locator("path.hypothesis-region").count(), 0);
+  ok("GNSS-loss replay: receiver excluded, no region drawn");
+
+  // Live: five GNSS-disciplined nodes report one target; the server locates and registers it.
+  await page.locator("#mode-live").click();
+  await page.waitForFunction(() => document.querySelector("#stats-body")?.innerText.includes("No live observation"));
+  const target = [44.36, 26.2];
+  async function sendBeacon(signal) {
+    const now = Date.now() / 1000;
+    for (const [id, p] of Object.entries(nodes)) {
+      const r = await fetch(base + "/api/detections", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: "Bearer " + tokens[id] },
+        body: JSON.stringify({ frequency_hz: 145.8e6, detections: [{ node: id, signal, local_s: now + dist(target, p) / C, sigma_s: 1e-7 }] }),
+      });
+      assert.equal(r.status, 200);
+    }
+  }
+  await sendBeacon("beacon-42");
+  await page.waitForFunction(() => document.querySelectorAll("#track-list li").length > 0, null, { timeout: 15000 });
+  await page.waitForFunction(() => /s \(1\)/.test(document.querySelector(".paint-delay")?.textContent || ""));
+  ok("foreground live map measures RF-to-display latency from the hardware timestamp");
+  await page.locator("#track-list li button").first().click();
+  await page.locator("#inspector").waitFor({ state: "visible" });
+  assert.match(await page.locator("#inspector").innerText(), /Fused fixes/);
+  assert.ok((await page.locator("path.leaflet-interactive").count()) >= 1);
+  ok("live: own-node detections located, registered as a track and inspectable");
+  await page.locator("#inspector .link").first().click();
+  try {
+    await page.waitForFunction(() => /pair delays/i.test(document.querySelector("#inspector")?.innerText || ""), null, { timeout: 8000 });
+  } catch (e) {
+    console.log("INSPECTOR:", await page.locator("#inspector").innerText());
+    console.log("TOAST:", await page.locator("#toast").innerText().catch(() => ""));
+    throw e;
+  }
+  assert.match(await page.locator("#inspector").innerText(), /Located/);
+  assert.equal(await page.locator("#inspector .rx-row").count(), 5);
+  ok("observation inspector: located, five receivers, pair delays");
+  await page.screenshot({ path: join(repo, "evidence/live.png") });
+
+  await sendBeacon("beacon-43");
+  await page.waitForFunction(() => document.querySelector(".paint-delay")?.textContent.endsWith(" s (2)"));
+  for (const column of [".api-delay", ".paint-delay"]) {
+    const match = /^(\d+\.\d) \/ (\d+\.\d) s \(2\)$/.exec(await page.locator(column).innerText());
+    assert.ok(match && Number(match[2]) >= Number(match[1]), `ordered percentiles and sample count in ${column}`);
+  }
+  await page.reload();
+  await page.locator("#mode-replay[aria-selected='true']").waitFor();
+  await page.locator("#mode-live").click();
+  await page.waitForFunction(() => document.querySelector(".api-delay")?.textContent.endsWith(" s (2)"));
+  assert.equal(await page.locator(".paint-delay").innerText(), "—");
+  ok("two live fixes have P50/P90 and counts, reloading keeps only measured API latency");
+
+  const mobile = await browser.newPage({ viewport: { width: 390, height: 844 }, isMobile: true });
+  await mobile.goto(base + "/", { waitUntil: "load" });
+  const overflow = await mobile.evaluate(() => document.scrollingElement.scrollWidth - window.innerWidth);
+  assert.ok(overflow <= 0, `horizontal overflow ${overflow}px`);
+  await mobile.screenshot({ path: join(repo, "evidence/mobile.png") });
+  ok("390 px layout without horizontal overflow");
   assert.deepEqual(errors, []);
-  ok("no browser JavaScript exceptions");
-  writeFileSync(
-    "evidence/browser-tests.json",
-    JSON.stringify(
-      {
-        passed: true,
-        checks,
-        console_errors: errors,
-        browser: await browser.version(),
-        utc: new Date().toISOString(),
-      },
-      null,
-      2,
-    ),
-  );
-} catch(error) {
-  writeFileSync("evidence/browser-tests.json",JSON.stringify({passed:false,checks,error:error.message,console_errors:errors,utc:new Date().toISOString()},null,2));
-  throw error;
+  ok("no page errors");
+  writeFileSync(join(repo, "evidence/browser-tests.json"), JSON.stringify({ executed_at: new Date().toISOString(), checks }, null, 1));
 } finally {
   await browser.close();
+  server.kill("SIGTERM");
+  rmSync(work, { recursive: true, force: true });
 }

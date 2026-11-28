@@ -1,6 +1,23 @@
 {
   "listen": "0.0.0.0:3000",
   "live_enabled": true,
+  "monitor": {
+    "target_id": "dcf77-validation",
+    "additional_target_ids": [
+      "ft8-20m",
+      "ft8-40m",
+      "msf-channel",
+      "ft8-30m",
+      "dcf77-channel",
+      "ft8-17m",
+      "ft8-15m",
+      "am-648khz",
+      "am-5mhz"
+    ],
+    "interval_s": 60,
+    "directory_receivers": 12,
+    "parallel_bands": 2
+  },
   "kiwirecorder_path": "vendor/kiwiclient/kiwirecorder.py",
   "python": "python3",
   "gps_utc_offset_s": 18,
@@ -208,6 +225,267 @@
       ],
       "duration_s": 30,
       "verification": "dcf77_prn_v1"
+    },
+    {
+      "id": "ibp-20m",
+      "kind": "public_beacon",
+      "frequency_hz": 14100000,
+      "eligibility_evidence": {
+        "url": "https://www.ncdxf.org/beacon/",
+        "note": "NCDXF/IARU International Beacon Project public shared channel. Validate the scheduled CW callsign in each separate UTC slot."
+      },
+      "source_ids": [
+        "f82e0c018380",
+        "00aafd2d3947",
+        "147f0fdf7a94",
+        "f82e0c136d0e",
+        "0cb2b7d6cd86"
+      ],
+      "duration_s": 30,
+      "verification": "ncdxf_cw_v1"
+    },
+    {
+      "id": "ibp-17m",
+      "kind": "public_beacon",
+      "frequency_hz": 18110000,
+      "eligibility_evidence": {
+        "url": "https://www.ncdxf.org/beacon/",
+        "note": "NCDXF/IARU International Beacon Project public shared channel. Validate the scheduled CW callsign in each separate UTC slot."
+      },
+      "source_ids": [
+        "f82e0c018380",
+        "00aafd2d3947",
+        "147f0fdf7a94",
+        "f82e0c136d0e",
+        "0cb2b7d6cd86"
+      ],
+      "duration_s": 30,
+      "verification": "ncdxf_cw_v1"
+    },
+    {
+      "id": "ibp-15m",
+      "kind": "public_beacon",
+      "frequency_hz": 21150000,
+      "eligibility_evidence": {
+        "url": "https://www.ncdxf.org/beacon/",
+        "note": "NCDXF/IARU International Beacon Project public shared channel. Validate the scheduled CW callsign in each separate UTC slot."
+      },
+      "source_ids": [
+        "f82e0c018380",
+        "00aafd2d3947",
+        "147f0fdf7a94",
+        "f82e0c136d0e",
+        "0cb2b7d6cd86"
+      ],
+      "duration_s": 30,
+      "verification": "ncdxf_cw_v1"
+    },
+    {
+      "id": "ibp-12m",
+      "kind": "public_beacon",
+      "frequency_hz": 24930000,
+      "eligibility_evidence": {
+        "url": "https://www.ncdxf.org/beacon/",
+        "note": "NCDXF/IARU International Beacon Project public shared channel. Validate the scheduled CW callsign in each separate UTC slot."
+      },
+      "source_ids": [
+        "f82e0c018380",
+        "00aafd2d3947",
+        "147f0fdf7a94",
+        "f82e0c136d0e",
+        "0cb2b7d6cd86"
+      ],
+      "duration_s": 30,
+      "verification": "ncdxf_cw_v1"
+    },
+    {
+      "id": "ibp-10m",
+      "kind": "public_beacon",
+      "frequency_hz": 28200000,
+      "eligibility_evidence": {
+        "url": "https://www.ncdxf.org/beacon/",
+        "note": "NCDXF/IARU International Beacon Project public shared channel. Validate the scheduled CW callsign in each separate UTC slot."
+      },
+      "source_ids": [
+        "f82e0c018380",
+        "00aafd2d3947",
+        "147f0fdf7a94",
+        "f82e0c136d0e",
+        "0cb2b7d6cd86"
+      ],
+      "duration_s": 30,
+      "verification": "ncdxf_cw_v1"
+    },
+    {
+      "id": "ft8-40m",
+      "kind": "amateur_digital",
+      "frequency_hz": 7074000,
+      "eligibility_evidence": {
+        "url": "https://sourceforge.net/p/wsjt/wsjtx/ci/master/tree/models/FrequencyList.cpp",
+        "note": "WSJT-X default FT8 dial frequency 7074000 Hz for all IARU regions (models/FrequencyList.cpp). Each station is identified only from a message decoded in this capture's own IQ; its sent locator is kept for post-hoc evaluation only."
+      },
+      "source_ids": [
+        "f82e0c018380",
+        "00aafd2d3947",
+        "147f0fdf7a94",
+        "f82e0c136d0e",
+        "0cb2b7d6cd86"
+      ],
+      "duration_s": 30,
+      "verification": "ft8_v1",
+      "min_spacing_km": 600
+    },
+    {
+      "id": "ft8-30m",
+      "kind": "amateur_digital",
+      "frequency_hz": 10136000,
+      "eligibility_evidence": {
+        "url": "https://sourceforge.net/p/wsjt/wsjtx/ci/master/tree/models/FrequencyList.cpp",
+        "note": "WSJT-X default FT8 dial frequency 10136000 Hz for all IARU regions (models/FrequencyList.cpp). Each station is identified only from a message decoded in this capture's own IQ; its sent locator is kept for post-hoc evaluation only."
+      },
+      "source_ids": [
+        "f82e0c018380",
+        "00aafd2d3947",
+        "147f0fdf7a94",
+        "f82e0c136d0e",
+        "0cb2b7d6cd86"
+      ],
+      "duration_s": 30,
+      "verification": "ft8_v1",
+      "min_spacing_km": 600
+    },
+    {
+      "id": "ft8-20m",
+      "kind": "amateur_digital",
+      "frequency_hz": 14074000,
+      "eligibility_evidence": {
+        "url": "https://sourceforge.net/p/wsjt/wsjtx/ci/master/tree/models/FrequencyList.cpp",
+        "note": "WSJT-X default FT8 dial frequency 14074000 Hz for all IARU regions (models/FrequencyList.cpp). Each station is identified only from a message decoded in this capture's own IQ; its sent locator is kept for post-hoc evaluation only."
+      },
+      "source_ids": [
+        "f82e0c018380",
+        "00aafd2d3947",
+        "147f0fdf7a94",
+        "f82e0c136d0e",
+        "0cb2b7d6cd86"
+      ],
+      "duration_s": 30,
+      "verification": "ft8_v1",
+      "min_spacing_km": 600
+    },
+    {
+      "id": "ft8-17m",
+      "kind": "amateur_digital",
+      "frequency_hz": 18100000,
+      "eligibility_evidence": {
+        "url": "https://sourceforge.net/p/wsjt/wsjtx/ci/master/tree/models/FrequencyList.cpp",
+        "note": "WSJT-X default FT8 dial frequency 18100000 Hz for all IARU regions (models/FrequencyList.cpp). Each station is identified only from a message decoded in this capture's own IQ; its sent locator is kept for post-hoc evaluation only."
+      },
+      "source_ids": [
+        "f82e0c018380",
+        "00aafd2d3947",
+        "147f0fdf7a94",
+        "f82e0c136d0e",
+        "0cb2b7d6cd86"
+      ],
+      "duration_s": 30,
+      "verification": "ft8_v1",
+      "min_spacing_km": 600
+    },
+    {
+      "id": "ft8-15m",
+      "kind": "amateur_digital",
+      "frequency_hz": 21074000,
+      "eligibility_evidence": {
+        "url": "https://sourceforge.net/p/wsjt/wsjtx/ci/master/tree/models/FrequencyList.cpp",
+        "note": "WSJT-X default FT8 dial frequency 21074000 Hz for all IARU regions (models/FrequencyList.cpp). Each station is identified only from a message decoded in this capture's own IQ; its sent locator is kept for post-hoc evaluation only."
+      },
+      "source_ids": [
+        "f82e0c018380",
+        "00aafd2d3947",
+        "147f0fdf7a94",
+        "f82e0c136d0e",
+        "0cb2b7d6cd86"
+      ],
+      "duration_s": 30,
+      "verification": "ft8_v1",
+      "min_spacing_km": 600
+    },
+    {
+      "id": "msf-channel",
+      "kind": "monitored_channel",
+      "frequency_hz": 60000,
+      "eligibility_evidence": {
+        "url": "https://www.npl.co.uk/products-services/time-frequency/msf-radio-time-signal",
+        "note": "NPL: the MSF time signal operates on 60 kHz from Anthorn Radio Station. Monitored as an unknown-emitter channel; nothing about the transmitter is a solver input."
+      },
+      "source_ids": [
+        "f82e0c018380",
+        "00aafd2d3947",
+        "147f0fdf7a94",
+        "f82e0c136d0e",
+        "0cb2b7d6cd86"
+      ],
+      "duration_s": 30,
+      "verification": "correlated_v1",
+      "min_spacing_km": 150
+    },
+    {
+      "id": "dcf77-channel",
+      "kind": "monitored_channel",
+      "frequency_hz": 77500,
+      "eligibility_evidence": {
+        "url": "https://www.ptb.de/cms/en/ptb/fachabteilungen/abt4/fb-44/ag-442/dissemination-of-legal-time/dcf77.html",
+        "note": "PTB DCF77 77.5 kHz. The same channel as the PRN-verified target, here analysed without any DCF77-specific knowledge as a cross-check of the unknown-emitter pipeline."
+      },
+      "source_ids": [
+        "f82e0c018380",
+        "00aafd2d3947",
+        "147f0fdf7a94",
+        "f82e0c136d0e",
+        "0cb2b7d6cd86"
+      ],
+      "duration_s": 30,
+      "verification": "correlated_v1",
+      "min_spacing_km": 150
+    },
+    {
+      "id": "am-648khz",
+      "kind": "monitored_channel",
+      "frequency_hz": 648000,
+      "eligibility_evidence": {
+        "url": "https://www.radiocaroline.co.uk/manx_info.html",
+        "note": "Radio Caroline lists its public AM service on 648 kHz. Correlate the received modulation. Other stations may share the channel."
+      },
+      "source_ids": [
+        "f82e0c018380",
+        "00aafd2d3947",
+        "147f0fdf7a94",
+        "f82e0c136d0e",
+        "0cb2b7d6cd86"
+      ],
+      "duration_s": 30,
+      "verification": "correlated_v1",
+      "min_spacing_km": 150
+    },
+    {
+      "id": "am-5mhz",
+      "kind": "monitored_channel",
+      "frequency_hz": 5000000,
+      "eligibility_evidence": {
+        "url": "https://www.nist.gov/pml/time-and-frequency-division/time-distribution/radio-station-wwv",
+        "note": "NIST publishes a double-sideband AM time broadcast on 5 MHz. Stations share this frequency. Channel occupancy does not identify a transmitter."
+      },
+      "source_ids": [
+        "f82e0c018380",
+        "00aafd2d3947",
+        "147f0fdf7a94",
+        "f82e0c136d0e",
+        "0cb2b7d6cd86"
+      ],
+      "duration_s": 30,
+      "verification": "correlated_v1",
+      "min_spacing_km": 600
     }
   ],
   "gps_offset_valid_until_utc": "2027-01-01T00:00:00Z"

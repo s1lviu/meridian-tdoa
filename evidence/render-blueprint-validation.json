@@ -1,14 +1,15 @@
 {
-  "checked_at": "2026-11-27T10:41:46.402292+00:00",
+  "checked_at": "2026-11-28T10:30:47.468110+00:00",
   "schema_url": "https://render.com/schema/render.yaml.json",
   "schema_sha256": "13248a0ed6e60d3ba2f770a62b2b3075deffcdb141502d7324b3566c9260444f",
-  "config_sha256": "d33d1cb2e9590c2098b91dfc9d9aaf6f1b1b26371ea125e502bc7a871e4e3af0",
+  "config_sha256": "aec0574b87100e59c7826696bd6a751d23a87772efc4a79414299dcf088f376e",
   "schema_valid": true,
   "plan": "free",
+  "auto_deploy_trigger": "checksPass",
   "paid_resources_created": false,
   "render_deployed": false,
   "live_rf_validated_on_render": false,
-  "validation_scope": "Local validation against the official JSON Schema. The custom shutdown delay was removed in response to the reported Render Free rejection. Remote Blueprint revalidation has not been observed.",
+  "validation_scope": "Local validation against the official JSON Schema (Draft 2020-12). autoDeployTrigger changed from off to checksPass on 2026-11-28; the previous configuration d33d1cb2e9590c2098b91dfc9d9aaf6f1b1b26371ea125e502bc7a871e4e3af0 validated against the same schema. The custom shutdown delay was removed in response to the reported Render Free rejection. Remote Blueprint revalidation has not been observed.",
   "reported_plan_rejection": {
     "reported_on": "2026-11-27",
     "source": "Render Blueprint creation error supplied by the deployment user",

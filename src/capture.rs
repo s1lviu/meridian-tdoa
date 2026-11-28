@@ -1,4 +1,4 @@
-//! Live acquisition delegates only the documented wire protocol to pinned KiwiClient.
+//! Public KiwiSDR capture with operator preflight, quotas and GNSS-timed IQ.
 use crate::{
     geo,
     model::*,
@@ -14,40 +14,43 @@ use std::{
 };
 use tokio::process::Command;
 
-fn safe_id(id: &str) -> bool {
+pub fn safe_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() < 64
         && id
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
-pub fn authorize(config: &Config, target: &Target) -> Result<Vec<LiveSource>> {
+
+fn recorder_python(configured: &str) -> Result<PathBuf> {
+    if !configured.contains('/') {
+        return Ok(PathBuf::from(configured));
+    }
+    // The recorder runs from its capture directory. Keep the venv symlink so
+    // Python can find its pyvenv.cfg and installed packages.
+    let path = std::path::absolute(configured)?;
     ensure!(
-        config.live_enabled,
-        "Live capture is disabled in the configuration"
+        path.is_file(),
+        "Python interpreter not found: {}",
+        path.display()
     );
+    Ok(path)
+}
+
+/// IQ centre frequency for a target: IBP channels sit 700 Hz above the centre, the FT8
+/// sub-band 0–3 kHz above the dial sits around a centre 1.5 kHz above it.
+pub fn iq_center(target: &Target) -> f64 {
+    match target.verification.as_deref() {
+        Some(crate::ibp::PROFILE) => target.frequency_hz - 700.0,
+        Some(crate::ft8_tdoa::PROFILE) => target.frequency_hz + crate::ft8_tdoa::IQ_OFFSET_HZ,
+        _ => target.frequency_hz,
+    }
+}
+
+pub fn validate_clock(config: &Config, duration_s: u64) -> Result<()> {
+    ensure!((10..=120).contains(&duration_s), "Invalid capture duration");
     ensure!(
-        [
-            "public_beacon",
-            "participating_amateur",
-            "public_time_reference"
-        ]
-        .contains(&target.kind.as_str())
-            && valid_evidence(&target.eligibility_evidence),
-        "Target eligibility is not documented"
-    );
-    ensure!(
-        safe_id(&target.id)
-            && (10..=120).contains(&target.duration_s)
-            && (3..=8).contains(&target.source_ids.len()),
-        "Invalid target configuration"
-    );
-    ensure!(
-        target.frequency_hz.is_finite() && (6000.0..=30e6).contains(&target.frequency_hz),
-        "Invalid frequency"
-    );
-    ensure!(
-        valid_evidence(&config.gps_offset_evidence),
+        valid_evidence(&config.gps_offset_evidence) && (0..=60).contains(&config.gps_utc_offset_s),
         "Verify the current GPS–UTC offset"
     );
     let valid_until = DateTime::parse_from_rfc3339(
@@ -58,9 +61,52 @@ pub fn authorize(config: &Config, target: &Target) -> Result<Vec<LiveSource>> {
     )?;
     ensure!(
         valid_until.with_timezone(&Utc)
-            > Utc::now() + chrono::Duration::seconds(target.duration_s as i64 + 120),
+            > Utc::now() + chrono::Duration::seconds(duration_s as i64 + 120),
         "Revalidate the IERS bulletin and GPS–UTC deadline before capture"
     );
+    Ok(())
+}
+
+pub fn authorize(config: &Config, target: &Target) -> Result<Vec<LiveSource>> {
+    if target.verification.as_deref() == Some(crate::ibp::PROFILE) {
+        ensure!(
+            target.kind == "public_beacon" && crate::ibp::band(target.frequency_hz).is_some(),
+            "IBP capture requires a published beacon channel"
+        );
+    }
+    if target.verification.as_deref() == Some(crate::ft8_tdoa::PROFILE) {
+        ensure!(
+            target.kind == "amateur_digital" && crate::bands::name(target.frequency_hz).is_some(),
+            "FT8 capture requires a dial frequency inside an amateur band"
+        );
+    }
+    ensure!(
+        config.live_enabled,
+        "Live capture is disabled in the configuration"
+    );
+    ensure!(
+        [
+            "public_beacon",
+            "participating_amateur",
+            "public_time_reference",
+            "amateur_digital",
+            "monitored_channel"
+        ]
+        .contains(&target.kind.as_str())
+            && valid_evidence(&target.eligibility_evidence),
+        "Target eligibility is not documented"
+    );
+    ensure!(
+        safe_id(&target.id)
+            && (10..=120).contains(&target.duration_s)
+            && (3..=crate::pipeline::MAX_RECEIVERS).contains(&target.source_ids.len()),
+        "Invalid target configuration"
+    );
+    ensure!(
+        target.frequency_hz.is_finite() && (6000.0..=30e6).contains(&target.frequency_hz),
+        "Invalid frequency"
+    );
+    validate_clock(config, target.duration_s)?;
     let mut sources = vec![];
     let mut devices = HashSet::new();
     for id in &target.source_ids {
@@ -99,8 +145,8 @@ pub fn authorize(config: &Config, target: &Target) -> Result<Vec<LiveSource>> {
             valid_evidence(&s.bands_evidence)
                 && s.bands_hz
                     .iter()
-                    .any(|b| b[0] <= target.frequency_hz - 5000.
-                        && b[1] >= target.frequency_hz + 5000.),
+                    .any(|b| b[0] <= iq_center(target) - 5000.
+                        && b[1] >= iq_center(target) + 5000.),
             "The IQ channel falls outside approved bands: {}",
             s.id
         );
@@ -260,50 +306,218 @@ async fn probe(
     anyhow::bail!("Too many /status redirects")
 }
 
-pub async fn capture(config: &Config, target: &Target, data_dir: &Path) -> Result<PathBuf> {
-    let sources = authorize(config, target)?;
-    fn bytes_in(path: &Path) -> Result<u64> {
-        if !path.exists() {
-            return Ok(0);
+/// What one receiver did during a capture attempt, for fair-use accounting.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ReceiverOutcome {
+    pub id: String,
+    pub ok: bool,
+    pub reason: Option<String>,
+    /// Channel time actually used on the receiver.
+    pub connected_s: f64,
+    /// Minimum block requested by the receiver's own refusal, seconds.
+    pub block_s: f64,
+}
+
+/// Outcomes of a capture directory: preflight errors, IQ delivered, and receiver refusals
+/// reported by KiwiClient (per-IP time limit, busy, down, bad password).
+pub fn outcomes(dir: &Path, duration_s: u64) -> Vec<ReceiverOutcome> {
+    let read = |name: &str| -> Vec<Value> {
+        std::fs::read(dir.join(name))
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default()
+    };
+    let mut out = vec![];
+    for c in read("source-checks.json") {
+        if let Some(err) = c["error"].as_str() {
+            out.push(ReceiverOutcome {
+                id: c["source"]["id"].as_str().unwrap_or_default().into(),
+                ok: false,
+                reason: Some(format!("Preflight: {err}")),
+                connected_s: 0.,
+                block_s: 0.,
+            });
         }
-        let mut size = 0u64;
-        for entry in std::fs::read_dir(path)? {
-            let entry = entry?;
-            let m = entry.metadata()?;
-            if m.is_file() {
-                size = size.saturating_add(m.len());
-            } else if m.is_dir() {
-                size = size.saturating_add(bytes_in(&entry.path())?);
-            }
-        }
-        Ok(size)
     }
-    let quota = std::env::var("MERIDIAN_CAPTURE_QUOTA_BYTES")
-        .ok()
-        .map(|s| s.parse::<u64>())
-        .transpose()?
-        .unwrap_or(2 * 1024 * 1024 * 1024);
-    ensure!(
-        bytes_in(data_dir)?.saturating_add(sources.len() as u64 * 64 * 1024 * 1024) <= quota,
-        "IQ archive quota almost exhausted; export/archive captures before continuing"
-    );
-    let cooldown = data_dir.join("last-attempt.json");
-    if let Ok(v) = std::fs::read(&cooldown)
-        .and_then(|b| serde_json::from_slice::<Value>(&b).map_err(std::io::Error::other))
-    {
-        if let Some(at) = v["utc"]
-            .as_str()
-            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-        {
+    for c in read("capture-outcomes.json") {
+        let id = c["receiver"].as_str().unwrap_or_default().to_string();
+        if c["captured"] == true {
+            out.push(ReceiverOutcome {
+                id,
+                ok: true,
+                reason: None,
+                connected_s: duration_s as f64,
+                block_s: 0.,
+            });
+            continue;
+        }
+        let log = std::fs::read_to_string(dir.join(format!("{id}.log"))).unwrap_or_default();
+        let refusal = log
+            .lines()
+            .find_map(|l| l.strip_prefix("MERIDIAN-REFUSAL "))
+            .map(|r| r.split_once(' ').map_or((r, ""), |(k, v)| (k, v)));
+        let (reason, block_s) = match refusal {
+            Some(("ip_limit", v)) => (
+                format!(
+                    "Receiver per-IP time limit reached ({} min per 24 h)",
+                    v.split("%2c").next().unwrap_or("?")
+                ),
+                86_400.,
+            ),
+            Some(("too_busy", _)) => ("All receiver channels busy".into(), 600.),
+            Some(("down", _)) => ("Receiver reports it is down".into(), 3600.),
+            Some(("badp", _)) => (
+                "Receiver requires a password for these channels".into(),
+                86_400.,
+            ),
+            Some((k, v)) => (format!("Receiver refused the connection ({k} {v})"), 600.),
+            None => (c["error"].as_str().unwrap_or("No IQ received").into(), 0.),
+        };
+        out.push(ReceiverOutcome {
+            id,
+            ok: false,
+            reason: Some(reason),
+            connected_s: 0.,
+            block_s,
+        });
+    }
+    out
+}
+
+pub fn last_attempt(data_dir: &Path) -> Result<Option<DateTime<Utc>>> {
+    #[derive(serde::Deserialize)]
+    struct Attempt {
+        utc: DateTime<Utc>,
+    }
+    match std::fs::read(data_dir.join("last-attempt.json")) {
+        Ok(v) => Ok(Some(serde_json::from_slice::<Attempt>(&v)?.utc)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+pub struct Capture {
+    config: Config,
+    target: Target,
+    sources: Vec<LiveSource>,
+    id: String,
+    directory: PathBuf,
+    _reservation: std::fs::File,
+    _receiver_locks: Vec<std::fs::File>,
+}
+
+impl Capture {
+    pub fn receiver_ids(&self) -> Vec<String> {
+        self.sources.iter().map(|s| s.id.clone()).collect()
+    }
+}
+
+/// Reserve storage and the shared cooldown once before any receiver is contacted.
+pub fn reserve_window(plans: Vec<(Config, Target)>, data_dir: &Path) -> Result<Vec<Capture>> {
+    ensure!(!plans.is_empty(), "Empty capture window");
+    let mut devices = HashSet::new();
+    let mut authorized = Vec::new();
+    for (config, target) in plans {
+        let sources = authorize(&config, &target)?;
+        for s in &sources {
             ensure!(
-                Utc::now().signed_duration_since(at).num_seconds() >= 60,
-                "At least 60 s between capture attempts; no automatic retries"
+                devices.insert(s.independent_device.clone()),
+                "Receiver already assigned to another band"
             );
         }
+        authorized.push((config, target, sources));
     }
-    crate::store::atomic_json(&cooldown, &json!({"utc":Utc::now().to_rfc3339()}))?;
-    let id = format!("live-{}", uuid::Uuid::new_v4());
-    let dir = data_dir.join(&id);
+    std::fs::create_dir_all(data_dir)?;
+    let mut windows = Vec::new();
+    for (config, target, sources) in authorized {
+        let mut locks = Vec::new();
+        for source in &sources {
+            use sha2::{Digest, Sha256};
+            let key = Sha256::digest(source.independent_device.as_bytes());
+            let lock = std::fs::File::options()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(data_dir.join(format!(".rx-{key:x}.lock")))?;
+            lock.try_lock()
+                .with_context(|| format!("Receiver {} has an active capture", source.id))?;
+            locks.push(lock);
+        }
+        let id = format!("live-{}", uuid::Uuid::new_v4());
+        let (directory, reservation) =
+            crate::retention::reserve(data_dir, &id, sources.len() as u64 * 64 * 1024 * 1024)?;
+        windows.push(Capture {
+            config,
+            target,
+            sources,
+            id,
+            directory,
+            _reservation: reservation,
+            _receiver_locks: locks,
+        });
+    }
+    crate::store::atomic_json(
+        &data_dir.join("last-attempt.json"),
+        &json!({"utc":Utc::now().to_rfc3339()}),
+    )?;
+    Ok(windows)
+}
+
+pub async fn capture(
+    config: &Config,
+    target: &Target,
+    data_dir: &Path,
+    db: &crate::db::Db,
+) -> Result<PathBuf> {
+    let mut window = reserve_window(vec![(config.clone(), target.clone())], data_dir)?;
+    record(window.pop().unwrap(), db).await
+}
+
+fn capture_minimum(target: &Target) -> usize {
+    match target.verification.as_deref() {
+        Some(crate::ibp::PROFILE | crate::ft8_tdoa::PROFILE) => 1,
+        Some(crate::channel::PROFILE) => 2,
+        _ => 3,
+    }
+}
+
+pub async fn record(mut capture: Capture, db: &crate::db::Db) -> Result<PathBuf> {
+    let blocked = db.unusable_receivers(
+        Utc::now().timestamp_millis(),
+        &capture.config.receivers,
+        capture.target.duration_s as f64,
+    )?;
+    let skipped: Vec<_> = capture
+        .sources
+        .iter()
+        .filter(|s| blocked.contains(&s.id))
+        .map(|s| s.id.clone())
+        .collect();
+    if !skipped.is_empty() {
+        crate::store::atomic_json(
+            &capture.directory.join("capture-policy.json"),
+            &json!({"skipped_receivers":skipped,"reason":"Receiver cooldown or daily budget"}),
+        )?;
+        capture.sources.retain(|s| !blocked.contains(&s.id));
+    }
+    ensure!(
+        capture.sources.len() >= capture_minimum(&capture.target),
+        "Insufficient eligible receivers after applying cooldown and daily budgets"
+    );
+    let outcome = record_iq(&capture).await;
+    db.account(&capture.directory, capture.target.duration_s);
+    if outcome.is_err() {
+        crate::retention::mark(&capture.directory, false)?;
+    }
+    outcome
+}
+
+async fn record_iq(capture: &Capture) -> Result<PathBuf> {
+    let config = &capture.config;
+    let target = &capture.target;
+    let id = capture.id.clone();
+    let dir = &capture.directory;
     tokio::fs::create_dir_all(dir.join("gnss_pos")).await?;
     let dir = dir.canonicalize()?;
     let client = reqwest::Client::builder()
@@ -313,8 +527,19 @@ pub async fn capture(config: &Config, target: &Target, data_dir: &Path) -> Resul
         .build()?;
     let mut checks = vec![];
     let mut available = vec![];
-    for s in &sources {
-        match probe(&client, s, target.frequency_hz).await {
+    let mut probes = tokio::task::JoinSet::new();
+    let center = iq_center(target);
+    for s in &capture.sources {
+        let s = s.clone();
+        let client = client.clone();
+        probes.spawn(async move {
+            let result = probe(&client, &s, center).await;
+            (s, result)
+        });
+    }
+    while let Some(probe) = probes.join_next().await {
+        let (s, result) = probe?;
+        match result {
             Ok((canonical, observation)) => {
                 checks.push(json!({"source":canonical,"observation":observation}));
                 available.push(canonical);
@@ -323,36 +548,55 @@ pub async fn capture(config: &Config, target: &Target, data_dir: &Path) -> Resul
         }
     }
     crate::store::atomic_json(&dir.join("source-checks.json"), &checks)?;
+    let minimum = capture_minimum(target);
     ensure!(
-        available.len() >= 3,
+        available.len() >= minimum,
         "{}: only {} receivers pass current checks; unmonitored interval. See source-checks.json",
         id,
         available.len()
     );
     ensure!(
-        geo::geometry(&available.iter().map(|s| s.position).collect::<Vec<_>>()) > 0.02,
+        minimum < 3
+            || geo::geometry(&available.iter().map(|s| s.position).collect::<Vec<_>>()) > 0.02,
         "Insufficient geometry after current checks"
     );
-    let recorder = Path::new(&config.kiwirecorder_path)
-        .canonicalize()
-        .context("Install KiwiClient with scripts/setup_kiwiclient.sh")?;
-    let transport = Path::new("scripts/kiwi_transport.py").canonicalize()?;
-    let python = if config.python.contains('/') {
-        Path::new(&config.python).canonicalize()?
-    } else {
-        PathBuf::from(&config.python)
+    // Select a transport before contacting the SND endpoint. Neither transport retries
+    // a refused receiver. Existing HTTP CONNECT proxy deployments retain KiwiClient.
+    let proxied = ["http_proxy", "HTTP_PROXY", "ALL_PROXY", "all_proxy"]
+        .iter()
+        .any(|k| std::env::var_os(k).is_some_and(|v| !v.is_empty()));
+    let transport = match std::env::var("MERIDIAN_KIWI_TRANSPORT").ok().as_deref() {
+        None if !proxied => None,
+        Some("native") if !proxied => None,
+        Some("native") => anyhow::bail!("Use the KiwiClient transport for a configured HTTP proxy"),
+        None | Some("kiwiclient") => Some((
+            recorder_python(&config.python)?,
+            Path::new("scripts/kiwi_transport.py").canonicalize()?,
+            Path::new(&config.kiwirecorder_path)
+                .canonicalize()
+                .context("Install KiwiClient with scripts/setup_kiwiclient.sh")?,
+        )),
+        Some(other) => anyhow::bail!("Unknown Kiwi transport {other}"),
     };
     let capture_time = Utc::now();
     let mut tasks = tokio::task::JoinSet::new();
-    // Independent child per physical receiver: one busy/disconnected receiver cannot stop the other captures.
+    // Independent task per physical receiver: one busy/disconnected receiver cannot stop the other captures.
     for source in available {
-        let python = python.clone();
-        let recorder = recorder.clone();
         let transport = transport.clone();
         let dir = dir.clone();
         let target = target.clone();
         tasks.spawn(async move {
             let result: Result<()> = async {
+                let Some((python, transport, recorder)) = transport else {
+                    return crate::kiwi_stream::record(
+                        &source.base_url,
+                        iq_center(&target),
+                        target.duration_s,
+                        &dir,
+                        &source.id,
+                    )
+                    .await;
+                };
                 let url = reqwest::Url::parse(&source.base_url)?;
                 let mut cmd = Command::new(python);
                 cmd.arg(transport)
@@ -369,7 +613,7 @@ pub async fn capture(config: &Config, target: &Target, data_dir: &Path) -> Resul
                         "--filename",
                         "capture",
                         "-f",
-                        &(target.frequency_hz / 1000.).to_string(),
+                        &(iq_center(&target) / 1000.).to_string(),
                         "-m",
                         "iq",
                         "--kiwi-wav",
@@ -388,7 +632,7 @@ pub async fn capture(config: &Config, target: &Target, data_dir: &Path) -> Resul
                         "--socket-timeout",
                         "8",
                         "--user",
-                        "Meridian-TDoA public beacon measurement",
+                        "Meridian-TDoA measurement",
                         "--quiet",
                     ])
                     .arg("--dir")
@@ -402,7 +646,7 @@ pub async fn capture(config: &Config, target: &Target, data_dir: &Path) -> Resul
                     tokio::time::timeout(Duration::from_secs(target.duration_s + 20), cmd.status())
                         .await
                         .context("Timeout IQ")??;
-                ensure!(status.success(), "KiwiClient terminat cu eroare");
+                ensure!(status.success(), "KiwiClient exited with an error");
                 Ok(())
             }
             .await;
@@ -432,11 +676,12 @@ pub async fn capture(config: &Config, target: &Target, data_dir: &Path) -> Resul
             position_uncertainty_m: s.position_uncertainty_m,
             file: file.file_name().unwrap().to_string_lossy().into(),
             sha256: checksum(&file)?,
+            timing_sigma_ns: None,
         });
     }
     crate::store::atomic_json(&dir.join("capture-outcomes.json"), &outcomes)?;
     ensure!(
-        receivers.len() >= 3,
+        receivers.len() >= minimum,
         "{}: only {} IQ streams saved; no valid TDoA measurement. See capture-outcomes.json and receiver logs",
         id,
         receivers.len()
@@ -448,17 +693,20 @@ pub async fn capture(config: &Config, target: &Target, data_dir: &Path) -> Resul
         kind: target.kind.clone(),
         mode: "live".into(),
         frequency_hz: target.frequency_hz,
+        capture_profile: target.verification.clone(),
+        iq_center_hz: Some(iq_center(target)),
         capture_utc: capture_time.to_rfc3339(),
         gps_utc_offset_s: config.gps_utc_offset_s,
         provenance: target.eligibility_evidence.clone(),
         emission_verified: false,
         identity: None,
         receivers,
+        rejected_receivers: vec![],
     };
     // Eligibility of a monitored channel never establishes the callsign of a particular emission.
     let path = dir.join("manifest.json");
     crate::store::atomic_json(&path, &manifest)?;
-    if target.verification.as_deref() == Some("dcf77_prn_v1") {
+    if target.verification.as_deref() == Some(crate::protocol::PROFILE) {
         // Failure leaves the durable capture pending review; it never promotes a channel by frequency alone.
         if let Err(e) = crate::protocol::verify(&path) {
             crate::store::atomic_json(
@@ -473,6 +721,21 @@ pub async fn capture(config: &Config, target: &Target, data_dir: &Path) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn recorder_preserves_virtualenv_interpreter_and_path_lookup() {
+        let dir = tempfile::tempdir().unwrap();
+        let system = dir.path().join("system-python");
+        let venv = dir.path().join("venv/bin/python");
+        std::fs::write(&system, []).unwrap();
+        std::fs::create_dir_all(venv.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&system, &venv).unwrap();
+
+        assert_eq!(recorder_python(venv.to_str().unwrap()).unwrap(), venv);
+        assert_eq!(recorder_python("python3").unwrap(), Path::new("python3"));
+    }
+
     #[test]
     fn actual_status_is_accepted_but_api_optout_missing_policy_and_gnss_loss_are_refused() {
         let c: Config = serde_json::from_str(include_str!("../config/live-verified.json")).unwrap();

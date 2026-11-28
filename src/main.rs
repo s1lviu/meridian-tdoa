@@ -6,30 +6,47 @@ use axum::{
     routing::{get, post},
 };
 use chrono::{DateTime, Utc};
-use meridian_tdoa::{capture, directory, geo, model::*, pipeline, store};
+use meridian_tdoa::{
+    bands, capture,
+    db::{self, Db},
+    directory, ft8_tdoa, geo, ibp,
+    model::*,
+    pipeline, protocol, retention, store,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{
-        Arc, RwLock,
+        Arc, Mutex, RwLock,
         atomic::{AtomicBool, Ordering},
     },
 };
 use tower_http::services::ServeDir;
+mod evaluation;
+mod monitor;
 
 #[derive(Clone)]
 struct App {
     config: Arc<Config>,
-    results: Arc<RwLock<Vec<Emission>>>,
-    jobs: Arc<RwLock<HashMap<String, Value>>>,
-    busy: Arc<AtomicBool>,
+    db: Arc<Db>,
+    persistence_failures: Arc<Mutex<HashSet<String>>>,
+    /// Concurrent jobs (capture windows, reprocessing); each holds one permit.
+    workers: Arc<tokio::sync::Semaphore>,
+    /// Receivers currently connected by an in-flight capture window.
+    leases: Arc<Mutex<HashSet<String>>>,
+    /// Node clocks (reference-emitter synchronization) and detections awaiting association.
+    clocks: Arc<Mutex<meridian_tdoa::sync::Network>>,
+    pending: Arc<Mutex<HashMap<(u64, String), PendingSignal>>>,
+    /// Server-sent events: one JSON message whenever observations or tracks change.
+    events: tokio::sync::broadcast::Sender<String>,
     datasets: Arc<Vec<(Manifest, PathBuf)>>,
     token: Arc<Option<String>>,
     directory: Arc<RwLock<Option<directory::Directory>>>,
     directory_refreshing: Arc<AtomicBool>,
     stopping: Arc<AtomicBool>,
+    monitor: Arc<RwLock<monitor::Status>>,
 }
 struct Error(StatusCode, String);
 impl IntoResponse for Error {
@@ -61,7 +78,7 @@ async fn ready(State(app): State<App>) -> impl IntoResponse {
         (
             StatusCode::OK,
             Json(
-                json!({"status":"ready","version":env!("CARGO_PKG_VERSION"),"busy":app.busy.load(Ordering::SeqCst)}),
+                json!({"status":"ready","version":env!("CARGO_PKG_VERSION"),"busy":busy(&app),"free_workers":app.workers.available_permits()}),
             ),
         )
     }
@@ -78,6 +95,8 @@ struct Filters {
     end: Option<String>,
     mode: Option<String>,
     scenario: Option<String>,
+    #[serde(default)]
+    compact: bool,
 }
 struct Selection {
     bbox: Option<[f64; 4]>,
@@ -87,6 +106,23 @@ struct Selection {
     end: DateTime<Utc>,
     mode: String,
     fault: bool,
+}
+fn band_range(band: Option<&str>) -> Result<(f64, f64), Error> {
+    Ok(match band.unwrap_or("all") {
+        "all" => (0., 6e9_f64.next_up()),
+        "lf" => (0., 300e3),
+        "mf" => (300e3, 3e6),
+        "hf" => (3e6, 30e6),
+        "vhf" => (30e6, 300e6),
+        "uhf" => (300e6, 3e9),
+        "shf" => (3e9, 6e9_f64.next_up()),
+        "other" => (f64::INFINITY, f64::INFINITY),
+        name => bands::BANDS
+            .iter()
+            .find(|(band, _, _)| *band == name)
+            .map(|(_, lo, hi)| (lo * 1e6, hi * 1e6))
+            .ok_or(bad("Unknown band"))?,
+    })
 }
 fn selection(q: Filters) -> Result<Selection, Error> {
     let bbox = if let Some(raw) = q.bbox {
@@ -108,16 +144,7 @@ fn selection(q: Filters) -> Result<Selection, Error> {
     } else {
         None
     };
-    let (low, high) = match q.band.as_deref().unwrap_or("all") {
-        "all" => (0., 30e6),
-        "lf" => (0., 300e3),
-        "mf" => (300e3, 3e6),
-        "hf" => (3e6, 30e6),
-        "80m" => (3.5e6, 4e6),
-        "40m" => (7e6, 7.3e6),
-        "20m" => (14e6, 14.35e6),
-        _ => return Err(bad("Unknown band")),
-    };
+    let (low, high) = band_range(q.band.as_deref())?;
     let parse = |s: &str| {
         DateTime::parse_from_rfc3339(s)
             .map(|t| t.with_timezone(&Utc))
@@ -125,7 +152,7 @@ fn selection(q: Filters) -> Result<Selection, Error> {
     };
     let start = parse(q.start.as_deref().unwrap_or("2000-01-01T00:00:00Z"))?;
     let end = parse(q.end.as_deref().unwrap_or("2100-01-01T00:00:00Z"))?;
-    if end <= start {
+    if end.timestamp_millis() <= start.timestamp_millis() {
         return Err(bad("UTC interval must be increasing"));
     }
     let mode = q.mode.unwrap_or("replay".into());
@@ -146,24 +173,100 @@ fn selection(q: Filters) -> Result<Selection, Error> {
         fault: scenario == "sync-loss",
     })
 }
-fn matches(e: &Emission, s: &Selection) -> bool {
-    let (Ok(a), Ok(b)) = (
-        DateTime::parse_from_rfc3339(&e.start_utc),
-        DateTime::parse_from_rfc3339(&e.end_utc),
-    ) else {
-        return false;
-    };
-    e.mode == s.mode
-        && e.fault_injected == s.fault
-        && e.frequency_hz >= s.low
-        && e.frequency_hz < s.high
-        && a < s.end
-        && b > s.start
+fn internal(e: impl std::fmt::Display) -> Error {
+    Error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
 }
+/// Every observation matching the non-geographic filters, newest first.
+fn select(app: &App, s: &Selection) -> Result<Vec<Emission>, Error> {
+    app.db
+        .emissions(&db::Query {
+            mode: s.mode.clone(),
+            fault: s.fault,
+            low_hz: s.low,
+            high_hz: s.high,
+            start_ms: s.start.timestamp_millis(),
+            end_ms: s.end.timestamp_millis(),
+            limit: 50_000,
+        })
+        .map_err(internal)
+}
+// Observations arrive newest first. Earlier contours are reusable only for fixed reference beacons.
+fn latest_signals<'a>(selected: &[&'a Emission]) -> Vec<(&'a Emission, Option<&'a Emission>)> {
+    let mut groups = HashMap::new();
+    let mut latest = Vec::new();
+    for &e in selected {
+        if !e.detected || !e.receivers.iter().any(|r| r.confirmed) {
+            continue;
+        }
+        let profile = e.reference.as_ref().map(|r| r.profile.as_str());
+        let call = e.identity.as_ref().map(|i| i.callsign.as_str());
+        let key = (
+            profile,
+            call,
+            e.frequency_hz.to_bits(),
+            (profile.is_none() && call.is_none()).then_some(e.id.as_str()),
+        );
+        let index = *groups.entry(key).or_insert_with(|| {
+            latest.push((e, None));
+            latest.len() - 1
+        });
+        if profile.is_some()
+            && latest[index].1.is_none()
+            && (e.estimate.is_some() || !e.hypotheses.is_empty())
+        {
+            latest[index].1 = Some(e);
+        }
+    }
+    latest
+}
+
+#[cfg(test)]
+#[test]
+fn reviewed_emissions_keep_their_own_measurement() {
+    let mut recorded: Emission =
+        serde_json::from_str(include_str!("../evidence/replay-result.json")).unwrap();
+    recorded.identity = None;
+    recorded.reference = None;
+    let mut earlier = recorded.clone();
+    earlier.identity = Some(Identity {
+        callsign: "EXAMPLE".into(),
+        evidence: recorded.provenance.clone(),
+    });
+    let mut later = earlier.clone();
+    later.id = "later".into();
+    later.hypotheses.clear();
+    later.estimate = None;
+    let mut another = recorded.clone();
+    another.id = "independent".into();
+    let mut silent = another.clone();
+    silent.detected = false;
+    let signals = latest_signals(&[&silent, &later, &earlier, &recorded, &another]);
+    assert_eq!(
+        signals
+            .iter()
+            .map(|(e, _)| e.id.as_str())
+            .collect::<Vec<_>>(),
+        ["later", &recorded.id, "independent"]
+    );
+    assert!(signals.iter().all(|(_, prior)| prior.is_none()));
+}
+
 async fn emissions(State(app): State<App>, Query(q): Query<Filters>) -> Api<Value> {
+    let compact = q.compact;
     let s = selection(q)?;
-    let results = app.results.read().unwrap();
-    let selected: Vec<_> = results.iter().filter(|e| matches(e, &s)).collect();
+    let results = select(&app, &s)?;
+    let selected: Vec<&Emission> = results.iter().collect();
+    let row = |e: &&Emission| {
+        if !compact {
+            return json!(e);
+        }
+        json!({"id":e.id,"identity":e.identity,"frequency_hz":e.frequency_hz,"start_utc":e.start_utc,
+            "status":e.status,"estimate":e.estimate,"hypotheses":e.hypotheses,
+            "confirmed_count":e.receivers.iter().filter(|r|r.confirmed).count(),
+            "pair_count":e.pairs.len(),"accepted_pair_count":e.pairs.iter().filter(|p|p.accepted).count(),
+            "used_ids":e.receivers.iter().filter(|r|r.used).map(|r|&r.receiver.id).collect::<Vec<_>>(),
+            "profile":e.reference.as_ref().map(|r| &r.profile)})
+    };
     let visible: Vec<_> = selected
         .iter()
         .filter(|e| {
@@ -172,13 +275,40 @@ async fn emissions(State(app): State<App>, Query(q): Query<Filters>) -> Api<Valu
                 .chain(e.hypotheses.iter())
                 .any(|est| s.bbox.is_none_or(|b| geo::intersects(&est.polygon, b)))
         })
-        .map(|e| *e)
+        .map(row)
         .collect();
     let unlocated: Vec<_> = selected
         .iter()
         .filter(|e| e.status == "undetermined" && e.estimate.is_none() && e.hypotheses.is_empty())
-        .map(|e| *e)
+        .map(row)
         .collect();
+    let history: Vec<_> = selected
+        .iter()
+        .filter(|e| compact && e.reference.is_some())
+        .take(120)
+        .map(row)
+        .collect();
+    let signals: Vec<_> = latest_signals(if compact { &selected } else { &[] }).into_iter()
+        .map(|(e, position)| {
+            let mut signal = row(&e);
+            let receivers: Vec<_> = e.receivers.iter().filter(|r| r.confirmed)
+                .map(|r| json!({"id":r.receiver.id,"position":r.receiver.position,"label":r.receiver.label})).collect();
+            signal["confirmed_receivers"] = json!(receivers);
+            if let Some(earlier) = position.filter(|p| p.id != e.id) {
+                signal["last_position"] = row(&earlier);
+            }
+            signal
+        })
+        .collect();
+    let band_stats = if compact && s.mode == "live" && !s.fault {
+        let jobs = app
+            .db
+            .jobs_between(s.start.timestamp_millis(), s.end.timestamp_millis())
+            .map_err(internal)?;
+        evaluation::bands(&results, s.start, s.end, &jobs, &app.config.targets)
+    } else {
+        Vec::new()
+    };
     let segments:Vec<_>=selected.iter().map(|e|json!({"start":e.start_utc,"end":e.end_utc,"frequency_hz":e.frequency_hz,"status":e.status,"receivers":e.receivers.len()})).collect();
     let mut intervals: Vec<_> = selected
         .iter()
@@ -215,18 +345,368 @@ async fn emissions(State(app): State<App>, Query(q): Query<Filters>) -> Api<Valu
         "partial"
     };
     Ok(Json(
-        json!({"emissions":visible,"unlocated":unlocated,"monitoring":{"status":monitoring,"segments":segments,"gaps":gaps,"scope":"Only recorded channels and receivers. This does not represent RF coverage of the viewport or monitoring of the entire band."},"total_matching":selected.iter().filter(|e|e.detected).count()}),
+        json!({"emissions":visible,"unlocated":unlocated,"history":history,"signals":signals,"band_stats":band_stats,"observatory":monitor::snapshot(&app),"monitoring":{"status":monitoring,"segments":segments,"gaps":gaps,"scope":"Only the sampled channels, receivers and times."},"total_matching":selected.iter().filter(|e|e.detected).count()}),
     ))
 }
-async fn detail(State(app): State<App>, ApiPath(id): ApiPath<String>) -> Api<Emission> {
-    app.results
-        .read()
-        .unwrap()
+#[derive(Default, Deserialize)]
+struct TrackQuery {
+    since: Option<String>,
+    band: Option<String>,
+    bbox: Option<String>,
+}
+/// Emitter registry: one entry per transmitter with its fused position and 95% ellipse.
+async fn tracks(State(app): State<App>, Query(q): Query<TrackQuery>) -> Api<Value> {
+    let since = match q.since.as_deref() {
+        Some(s) => DateTime::parse_from_rfc3339(s)
+            .map_err(bad)?
+            .timestamp_millis(),
+        None => Utc::now().timestamp_millis() - 24 * 3_600_000,
+    };
+    let bbox = match q.bbox {
+        Some(raw) => {
+            let a = raw
+                .split(',')
+                .map(|s| s.parse::<f64>().map_err(bad))
+                .collect::<Result<Vec<_>, _>>()?;
+            if a.len() != 4 {
+                return Err(bad("bbox must be west,south,east,north"));
+            }
+            Some([a[0], a[1], a[2], a[3]])
+        }
+        None => None,
+    };
+    let (low, high) = band_range(q.band.as_deref())?;
+    let rows: Vec<Value> = app
+        .db
+        .tracks_in_band(since, low, high)
+        .map_err(internal)?
+        .into_iter()
+        .filter(|t| {
+            bbox.is_none_or(|[w, s, e, n]| {
+                let lon_ok = if w <= e { t.center.lon >= w && t.center.lon <= e } else { t.center.lon >= w || t.center.lon <= e };
+                lon_ok && t.center.lat >= s && t.center.lat <= n
+            })
+        })
+        .map(|t| {
+            let (major, minor, azimuth) = t.ellipse_95();
+            json!({"track":t,"ellipse_95":{"major_km":major,"minor_km":minor,"azimuth_deg":azimuth}})
+        })
+        .collect();
+    Ok(Json(
+        json!({"since":DateTime::from_timestamp_millis(since),"tracks":rows,
+        "method":"Covariance intersection of successive fixes of the same transmitter; fixes outside the 99.9% gate are counted as rejected."}),
+    ))
+}
+async fn track_detail(State(app): State<App>, ApiPath(key): ApiPath<String>) -> Api<Value> {
+    let t = app
+        .db
+        .track(&key)
+        .map_err(internal)?
+        .ok_or(Error(StatusCode::NOT_FOUND, "Track not found".into()))?;
+    let observations: Vec<Value> = t
+        .observations
         .iter()
-        .find(|e| e.id == id)
-        .cloned()
+        .filter_map(|id| app.db.emission(id).ok().flatten())
+        .map(|e| json!({"id":e.id,"start_utc":e.start_utc,"status":e.status,"estimate":e.estimate,"hypotheses":e.hypotheses,
+            "confirmed":e.receivers.iter().filter(|r|r.confirmed).count()}))
+        .collect();
+    let (major, minor, azimuth) = t.ellipse_95();
+    Ok(Json(
+        json!({"track":t,"ellipse_95":{"major_km":major,"minor_km":minor,"azimuth_deg":azimuth},"observations":observations}),
+    ))
+}
+#[derive(Default, Deserialize)]
+struct StatsQuery {
+    start: Option<String>,
+    end: Option<String>,
+}
+/// Key figures per profile and band for a UTC interval (default: the last 24 h).
+async fn stats(State(app): State<App>, Query(q): Query<StatsQuery>) -> Api<Value> {
+    let parse = |s: Option<&str>, default: DateTime<Utc>| -> Result<DateTime<Utc>, Error> {
+        s.map_or(Ok(default), |v| {
+            DateTime::parse_from_rfc3339(v)
+                .map(|t| t.with_timezone(&Utc))
+                .map_err(bad)
+        })
+    };
+    let end = parse(q.end.as_deref(), Utc::now())?;
+    let start = parse(q.start.as_deref(), end - chrono::Duration::hours(24))?;
+    if end.timestamp_millis() <= start.timestamp_millis() {
+        return Err(bad("UTC interval must be increasing"));
+    }
+    let database = app.db.clone();
+    let rows = tokio::task::spawn_blocking(move || evaluation::summary(&database, start, end))
+        .await
+        .map_err(internal)?
+        .map_err(internal)?;
+    Ok(Json(json!({"start":start,"end":end,"rows":rows,
+        "note":"Errors are post-hoc distances to a hold-out reference (published DCF77/IBP positions, or the locator a station sent in its own FT8 message). The solver never sees them."})))
+}
+async fn receiver_health(State(app): State<App>) -> Api<Value> {
+    Ok(Json(
+        json!({"policy":app.config.receivers,"receivers":app.db.receiver_health().map_err(internal)?,
+        "leased":app.leases.lock().unwrap().iter().cloned().collect::<Vec<_>>()}),
+    ))
+}
+#[derive(Deserialize)]
+struct DetectionBatch {
+    detections: Vec<meridian_tdoa::sync::Detection>,
+    #[serde(default)]
+    frequency_hz: f64,
+}
+struct PendingSignal {
+    first_utc: DateTime<Utc>,
+    last_change: std::time::Instant,
+    dirty: bool,
+    reports: Vec<meridian_tdoa::sync::Detection>,
+}
+/// Node arrival-time reports. Each node authenticates with its own bearer token (hashed in config).
+async fn detections(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Json(b): Json<DetectionBatch>,
+) -> Api<Value> {
+    let token = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or("");
+    use sha2::{Digest, Sha256};
+    let hash = format!("{:x}", Sha256::digest(token.as_bytes()));
+    let node = app
+        .config
+        .nodes
+        .iter()
+        .find(|n| n.token_sha256 == hash)
+        .ok_or(Error(StatusCode::UNAUTHORIZED, "Unknown node token".into()))?;
+    if !(1. ..=6e9).contains(&b.frequency_hz)
+        || b.detections.len() > 1000
+        || b.detections.iter().any(|d| {
+            d.node != node.id
+                || d.signal.is_empty()
+                || d.signal.len() > 200
+                || (node.disciplined && d.free_running)
+                || !d.local_s.is_finite()
+                || !(d.sigma_s > 0. && d.sigma_s < 1.)
+        })
+    {
+        return Err(bad(
+            "Invalid frequency, signal, clock declaration or arrival measurement for this node",
+        ));
+    }
+    let mut pending = app.pending.lock().unwrap();
+    for d in b.detections {
+        let entry = pending
+            .entry((b.frequency_hz.round() as u64, d.signal.clone()))
+            .or_insert_with(|| PendingSignal {
+                first_utc: Utc::now(),
+                last_change: std::time::Instant::now(),
+                dirty: false,
+                reports: vec![],
+            });
+        if !entry.reports.iter().any(|x| {
+            x.node == d.node
+                && x.local_s == d.local_s
+                && x.sigma_s == d.sigma_s
+                && x.transmitter == d.transmitter
+        }) {
+            entry.reports.retain(|x| x.node != d.node);
+            entry.reports.push(d);
+            entry.last_change = std::time::Instant::now();
+            entry.dirty = true;
+        }
+    }
+    Ok(Json(
+        json!({"accepted":true,"pending_signals":pending.len()}),
+    ))
+}
+const SHUTDOWN_EVENT: &str = "__shutdown__";
+/// Push channel for the map: `change` events instead of client polling.
+async fn stream(
+    State(app): State<App>,
+) -> axum::response::sse::Sse<
+    impl futures_core::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+> {
+    use tokio_stream::StreamExt;
+    let rx = tokio_stream::wrappers::BroadcastStream::new(app.events.subscribe());
+    // The stream ends on shutdown so open map tabs never hold the graceful stop.
+    let events = rx
+        .filter_map(|m| m.ok())
+        .take_while(|m| m != SHUTDOWN_EVENT)
+        .map(|data| {
+            Ok(axum::response::sse::Event::default()
+                .event("change")
+                .data(data))
+        });
+    axum::response::sse::Sse::new(events).keep_alive(axum::response::sse::KeepAlive::default())
+}
+async fn clock_state(State(app): State<App>) -> Json<Value> {
+    Json(
+        json!({"clocks":*app.clocks.lock().unwrap(),"reference_emitters":app.config.reference_emitters,
+        "nodes":app.config.nodes.iter().map(|n| json!({"id":n.id,"label":n.label,"position":n.position})).collect::<Vec<_>>()}),
+    )
+}
+/// Associate pending detections after a short window: references update clocks, targets are solved.
+fn settle_detections(app: &App) {
+    let ready = {
+        let mut pending = app.pending.lock().unwrap();
+        let mut ready = vec![];
+        // A slower node can improve the original observation during one capture window.
+        pending.retain(|(frequency, signal), event| {
+            let age = event.last_change.elapsed().as_secs();
+            if event.dirty && age >= 2 {
+                ready.push((
+                    signal.clone(),
+                    *frequency as f64,
+                    event.reports.clone(),
+                    event.first_utc,
+                ));
+                event.dirty = false;
+            }
+            age < 120
+        });
+        // Clock filters need events in time order; the map has none.
+        ready.sort_by(|a, b| {
+            let t = |d: &[meridian_tdoa::sync::Detection]| {
+                d.iter().map(|x| x.local_s).fold(f64::INFINITY, f64::min)
+            };
+            t(&a.2).total_cmp(&t(&b.2))
+        });
+        ready
+    };
+    let positions: std::collections::BTreeMap<String, Point> = app
+        .config
+        .nodes
+        .iter()
+        .map(|n| (n.id.clone(), n.position))
+        .collect();
+    let mut stored = vec![];
+    for (signal, frequency, seen, first_utc) in ready {
+        let calls: HashSet<_> = seen
+            .iter()
+            .filter_map(|d| d.transmitter.as_deref())
+            .collect();
+        if let Some(r) = app.config.reference_emitters.iter().find(|r| {
+            !r.signal_prefix.is_empty()
+                && signal.starts_with(&r.signal_prefix)
+                && r.frequency_hz.is_none_or(|hz| hz.round() == frequency)
+                && r.callsign
+                    .as_ref()
+                    .is_none_or(|call| calls.len() == 1 && calls.contains(call.as_str()))
+                && pipeline::valid_position(r.position)
+                && pipeline::valid_evidence(&r.evidence)
+        }) {
+            app.clocks
+                .lock()
+                .unwrap()
+                .reference(r.position, &positions, &seen);
+            continue;
+        }
+        let disciplined: HashSet<String> = app
+            .config
+            .nodes
+            .iter()
+            .filter(|n| n.disciplined)
+            .map(|n| n.id.clone())
+            .collect();
+        let arrivals = app
+            .clocks
+            .lock()
+            .unwrap()
+            .corrected_with(&seen, &disciplined);
+        if arrivals.len() >= 3 {
+            let utc = if disciplined.is_empty() {
+                first_utc
+            } else {
+                let s = arrivals.iter().map(|a| a.1).fold(f64::INFINITY, f64::min);
+                let Some(utc) =
+                    DateTime::from_timestamp(s.floor() as i64, (s.rem_euclid(1.) * 1e9) as u32)
+                else {
+                    continue;
+                };
+                utc
+            };
+            let mut e = meridian_tdoa::sync::emission(
+                &signal,
+                &arrivals,
+                &app.config.nodes,
+                frequency,
+                utc,
+            );
+            if let Some(r) = &mut e.reference {
+                r.node_utc = Some(!disciplined.is_empty());
+            }
+            e.id = format!("mlat-{frequency:.0}-{signal}");
+            if signal.starts_with("ft8-") {
+                if calls.len() == 1 {
+                    e.identity = Some(meridian_tdoa::model::Identity {callsign:calls.iter().next().unwrap().to_string(),
+                        evidence: meridian_tdoa::model::Evidence {url:e.provenance.url.clone(),note:"Transmitter decoded locally from the same FT8 payload at a reporting node.".into()}});
+                }
+            }
+            stored.push(e);
+        }
+    }
+    if !stored.is_empty() {
+        if let Err(e) = app.db.put_emissions(&stored) {
+            eprintln!("Could not store node detections: {e}");
+        }
+    }
+}
+async fn detail(State(app): State<App>, ApiPath(id): ApiPath<String>) -> Api<Emission> {
+    app.db
+        .emission(&id)
+        .map_err(internal)?
         .map(Json)
         .ok_or(Error(StatusCode::NOT_FOUND, "Emission not found".into()))
+}
+async fn evaluate_observation(State(app): State<App>, ApiPath(id): ApiPath<String>) -> Api<Value> {
+    app.db
+        .emission(&id)
+        .map_err(internal)?
+        .as_ref()
+        .and_then(evaluation::report)
+        .map(Json)
+        .ok_or(Error(
+            StatusCode::NOT_FOUND,
+            "No published evaluation reference for this observation".into(),
+        ))
+}
+async fn beacons(State(app): State<App>) -> Json<Value> {
+    let guard = app.directory.read().unwrap();
+    let directory = guard.as_ref();
+    let mut receivers = Vec::new();
+    let mut other_receivers = Vec::new();
+    if let Some(d) = directory {
+        for r in &d.receivers {
+            let Some(position) = r.published_position() else {
+                continue;
+            };
+            let bands: Vec<_> = ibp::CHANNELS
+                .iter()
+                .filter(|(_, h)| r.covers(*h as f64 - 700.))
+                .map(|(b, _)| b)
+                .collect();
+            if bands.is_empty() {
+                other_receivers.push(json!({
+                    "id":r.id, "label":r.name, "position":position,
+                    "reason":r.exclusion().unwrap_or("No monitored HF channel in the published tuning range"),
+                    "gps_good":r.gps_good, "fixes_min":r.fixes_min,
+                    "users":r.users, "users_max":r.users_max
+                }));
+            } else {
+                receivers.push(json!({"id":r.id,"label":r.name,"position":position,"bands":bands}));
+            }
+        }
+    }
+    let channels: Vec<_> = ibp::CHANNELS
+        .iter()
+        .map(|(b, h)| json!({"band":b,"frequency_hz":h}))
+        .collect();
+    Json(
+        json!({"channels":channels,"callsigns":ibp::CALLS,"schedule_source":ibp::SOURCE,"server_utc":Utc::now(),
+        "directory_utc":directory.map(|d| &d.fetched_at),"directory_total":directory.map(|d|d.receivers.len()),
+        "receiver_pool":receivers,"other_receivers":other_receivers}),
+    )
 }
 fn pending_captures() -> Vec<Manifest> {
     std::fs::read_dir("data/captures")
@@ -235,12 +715,13 @@ fn pending_captures() -> Vec<Manifest> {
         .filter_map(|e| e.ok())
         .filter_map(|e| std::fs::read(e.path().join("manifest.json")).ok())
         .filter_map(|v| serde_json::from_slice::<Manifest>(&v).ok())
-        .filter(|m| !m.emission_verified)
+        .filter(|m| !m.emission_verified && !slot_profile(m))
         .collect()
 }
+
 async fn info(State(app): State<App>) -> Json<Value> {
     Json(
-        json!({"name":"Meridian","version":env!("CARGO_PKG_VERSION"),"live_enabled":app.config.live_enabled,"admin_configured":app.token.is_some(),"sources":app.config.sources,"targets":app.config.targets,"pending_captures":pending_captures(),"busy":app.busy.load(Ordering::SeqCst),"latest_live":app.results.read().unwrap().iter().filter(|e|e.mode=="live").map(|e| &e.start_utc).max(),"datasets":app.datasets.iter().map(|(m,_)|m).collect::<Vec<_>>(),"policy":"Public beacons, participating stations and the public DCF77 time reference for commissioning. Identity is not inferred from frequency or position."}),
+        json!({"name":"Meridian","version":env!("CARGO_PKG_VERSION"),"live_enabled":app.config.live_enabled,"band_ranges_mhz":bands::BANDS,"admin_configured":app.token.is_some(),"sources":app.config.sources,"targets":app.config.targets,"pending_captures":pending_captures(),"busy":busy(&app),"latest_live":app.db.latest_live_start().ok().flatten().and_then(DateTime::from_timestamp_millis),"datasets":app.datasets.iter().map(|(m,_)|m).collect::<Vec<_>>(),"policy":"Public beacons, participating stations and the public DCF77 time reference for commissioning. Identity is not inferred from frequency or position."}),
     )
 }
 #[derive(Default, Deserialize)]
@@ -308,71 +789,222 @@ struct ReplayRequest {
     #[serde(default)]
     force: bool,
 }
-fn lock_job(app: &App) -> Result<String, Error> {
+type WorkGuard = tokio::sync::OwnedSemaphorePermit;
+
+fn busy(app: &App) -> bool {
+    app.workers.available_permits() < app.config.max_parallel_jobs.max(1)
+}
+
+fn reserve_worker(app: &App) -> Result<WorkGuard, Error> {
     if app.stopping.load(Ordering::SeqCst) {
         return Err(Error(
             StatusCode::SERVICE_UNAVAILABLE,
             "Service is stopping".into(),
         ));
     }
-    if app.jobs.read().unwrap().len() >= 10000 {
+    let guard = app
+        .workers
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| Error(StatusCode::CONFLICT, "Every worker is busy".into()))?;
+    if app.stopping.load(Ordering::SeqCst) {
         return Err(Error(
-            StatusCode::INSUFFICIENT_STORAGE,
-            "Export/archive the job history before continuing".into(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Service is stopping".into(),
         ));
     }
-    if app
-        .busy
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
-        return Err(Error(
-            StatusCode::CONFLICT,
-            "A job is already running".into(),
-        ));
-    }
+    Ok(guard)
+}
+fn new_job(app: &App, monitor_target: Option<&str>) -> Result<String, Error> {
     let id = uuid::Uuid::new_v4().to_string();
-    let value = json!({"id":id,"status":"running","started_at":Utc::now().to_rfc3339()});
-    if let Err(e) = store::job(&id, &value) {
-        app.busy.store(false, Ordering::SeqCst);
+    let mut value = json!({"id":id,"status":"running","started_at":Utc::now().to_rfc3339()});
+    if let Some(target) = monitor_target {
+        value["monitor_target"] = json!(target);
+    }
+    if let Err(e) = app.db.put_job(&id, &value) {
         return Err(Error(StatusCode::INSUFFICIENT_STORAGE, e.to_string()));
     }
-    app.jobs.write().unwrap().insert(id.clone(), value);
     Ok(id)
+}
+fn lock_job(app: &App) -> Result<(String, WorkGuard), Error> {
+    let guard = reserve_worker(app)?;
+    Ok((new_job(app, None)?, guard))
 }
 fn record_job(app: &App, id: String, mut value: Value) {
     value["updated_at"] = json!(Utc::now().to_rfc3339());
-    if let Some(start) = app
-        .jobs
-        .read()
-        .unwrap()
-        .get(&id)
-        .and_then(|v| v.get("started_at"))
-    {
-        value["started_at"] = start.clone();
+    if let Ok(Some(job)) = app.db.job(&id) {
+        for key in ["started_at", "monitor_target"] {
+            if let Some(existing) = job.get(key) {
+                value[key] = existing.clone();
+            }
+        }
     }
-    if let Err(e) = store::job(&id, &value) {
+    if let Err(e) = app.db.put_job(&id, &value) {
         eprintln!("Job persistence failed: {e}");
         value["persistence_error"] = json!(e.to_string());
+        if let Ok(mut failed) = app.persistence_failures.lock() {
+            failed.insert(id);
+        }
     }
-    app.jobs.write().unwrap().insert(id, value);
+}
+/// Decide how long the capture's raw IQ is kept, then apply the time rules immediately.
+fn retire_capture(policy: &retention::Policy, manifest: &Path, verified: bool) {
+    let (Some(dir), Ok(captures)) = (manifest.parent(), Path::new("data/captures").canonicalize())
+    else {
+        return;
+    };
+    if !dir
+        .canonicalize()
+        .is_ok_and(|d| d.parent() == Some(captures.as_path()))
+    {
+        return; // replays and imported datasets are never retired
+    }
+    if let Err(e) = retention::mark(dir, verified) {
+        eprintln!("Retention marker failed: {e}");
+    }
+    if let Err(e) = retention::sweep(&captures, policy, Utc::now()) {
+        eprintln!("IQ retention sweep failed: {e}");
+    }
+}
+/// Key of the per-receiver "heard anything here" evidence: the channel frequency.
+pub(crate) fn channel_key(frequency_hz: f64) -> String {
+    format!("{frequency_hz:.0}")
+}
+/// Captures analysed slot by slot (one observation per transmission) rather than as one emission.
+fn slot_profile(m: &Manifest) -> bool {
+    matches!(
+        m.capture_profile.as_deref(),
+        Some(ibp::PROFILE) | Some(ft8_tdoa::PROFILE) | Some(meridian_tdoa::channel::PROFILE)
+    )
+}
+fn process_ibp(db: &Db, path: &Path, capture_id: &str) -> anyhow::Result<(Vec<Emission>, Value)> {
+    let m: Manifest = serde_json::from_slice(&std::fs::read(path)?)?;
+    let (emissions, summary) = if m.capture_profile.as_deref() == Some(ft8_tdoa::PROFILE) {
+        let a = ft8_tdoa::analyze(path)?;
+        if a.sampled_slots > 0 {
+            let mut strength = HashMap::<&str, f64>::new();
+            for r in a
+                .emissions
+                .iter()
+                .flat_map(|e| &e.receivers)
+                .filter(|r| r.confirmed)
+            {
+                let snr = r.signal_score_db;
+                strength
+                    .entry(&r.receiver.id)
+                    .and_modify(|v| *v = v.max(snr))
+                    .or_insert(snr);
+            }
+            db.record_listen(&m, &a.receiver_decodes, &strength)?;
+        }
+        let s = a.summary(capture_id);
+        (a.emissions, s)
+    } else if m.capture_profile.as_deref() == Some(meridian_tdoa::channel::PROFILE) {
+        let a = meridian_tdoa::channel::analyze(path)?;
+        // Listen-then-measure evidence: how many sub-band emissions each receiver confirmed.
+        let mut strength = HashMap::<&str, f64>::new();
+        let mut counts = Vec::new();
+        for (i, id) in a.listened.iter().enumerate() {
+            let mut heard = 0;
+            for (e, seg) in a.emissions.iter().zip(&a.segments) {
+                if e.receivers[i].confirmed {
+                    heard += 1;
+                    if let Some(snr) = seg.receiver_snr_db[i] {
+                        strength
+                            .entry(id)
+                            .and_modify(|v| *v = v.max(snr))
+                            .or_insert(snr);
+                    }
+                }
+            }
+            counts.push((id.clone(), heard));
+        }
+        db.record_listen(&m, &counts, &strength)?;
+        let ids: Vec<_> = a
+            .emissions
+            .iter()
+            .filter(|e| e.detected)
+            .map(|e| e.id.clone())
+            .collect();
+        let located = a.emissions.iter().filter(|e| e.estimate.is_some()).count();
+        let s = json!({"status":"completed","capture_id":capture_id,"profile":meridian_tdoa::channel::PROFILE,
+            "segments":a.segments.len(),"detected":ids.len(),"located":located,"emission_id":ids.first(),"emission_ids":ids});
+        (a.emissions, s)
+    } else {
+        let a = ibp::analyze(path)?;
+        let s = a.summary(capture_id);
+        (a.emissions, s)
+    };
+    db.replace_dataset(capture_id, &emissions)?;
+    Ok((emissions, summary))
+}
+/// Keep positively correlated IQ under the verified TTL, including anonymous signals.
+fn worth_keeping(rows: &[Emission]) -> bool {
+    rows.iter().any(|e| {
+        e.detected
+            && (e.pairs.iter().any(|p| p.accepted)
+                || (e.identity.is_some()
+                    && e.reference
+                        .as_ref()
+                        .is_some_and(|r| r.profile == ibp::PROFILE)))
+    })
 }
 async fn finish(app: App, id: String, path: Result<PathBuf, anyhow::Error>, fault: Option<String>) {
     if let Ok(p) = &path {
         if let Ok(bytes) = std::fs::read(p) {
             if let Ok(m) = serde_json::from_slice::<Manifest>(&bytes) {
+                if slot_profile(&m) {
+                    let file = p.clone();
+                    let capture = m.id.clone();
+                    let db = app.db.clone();
+                    let result =
+                        tokio::task::spawn_blocking(move || process_ibp(&db, &file, &capture))
+                            .await
+                            .map_err(anyhow::Error::from)
+                            .and_then(|v| v);
+                    let mut value = match result {
+                        Ok((rows, summary)) => {
+                            retire_capture(&app.config.retention, p, worth_keeping(&rows));
+                            summary
+                        }
+                        Err(err) => {
+                            let mut v = json!({"status":"failed","capture_id":m.id,"error":err.to_string()});
+                            if err
+                                .downcast_ref::<std::io::Error>()
+                                .is_some_and(|e| e.kind() == std::io::ErrorKind::StorageFull)
+                            {
+                                v["persistence_error"] = json!(err.to_string());
+                            }
+                            v
+                        }
+                    };
+                    value["id"] = json!(id);
+                    record_job(&app, id, value);
+                    return;
+                }
                 if m.mode == "live" && !m.emission_verified {
+                    if m.capture_profile.as_deref() == Some(meridian_tdoa::protocol::PROFILE) {
+                        retire_capture(&app.config.retention, p, false);
+                        record_job(
+                            &app,
+                            id.clone(),
+                            json!({"id":id,"status":"completed","capture_id":m.id,"detected":false,"message":"DCF77 phase code was not verified on sufficient receivers."}),
+                        );
+                        return;
+                    }
+                    // User-reviewed profiles keep a bounded review window.
+                    retire_capture(&app.config.retention, p, true);
                     record_job(
                         &app,
                         id.clone(),
                         json!({"id":id,"status":"awaiting_review","capture_id":m.id,"message":"Capture saved. Confirm emission eligibility with evidence before localization."}),
                     );
-                    app.busy.store(false, Ordering::SeqCst);
                     return;
                 }
             }
         }
     }
+    let manifest = path.as_ref().ok().cloned();
     let result = match path {
         Ok(p) => tokio::task::spawn_blocking(move || pipeline::process(&p, fault.as_deref()))
             .await
@@ -380,23 +1012,30 @@ async fn finish(app: App, id: String, path: Result<PathBuf, anyhow::Error>, faul
             .and_then(|r| r),
         Err(e) => Err(e),
     };
+    if let (Some(m), Ok(e)) = (&manifest, &result) {
+        if e.mode == "live" {
+            retire_capture(&app.config.retention, m, e.detected);
+        }
+    }
     let value = match result {
-        Ok(e) => match pipeline::save(&e, Path::new("data/results")) {
-            Ok(()) => {
-                let eid = e.id.clone();
-                let mut rs = app.results.write().unwrap();
-                rs.retain(|v| v.id != eid);
-                rs.push(e);
-                json!({"id":id,"status":"completed","emission_id":eid})
+        Ok(e) => match app.db.put_emissions(std::slice::from_ref(&e)) {
+            Ok(()) => json!({"id":id,"status":"completed","emission_id":e.id}),
+            Err(err) => {
+                json!({"id":id,"status":"failed","persistence_error":err.to_string(),"error":err.to_string()})
             }
-            Err(err) => json!({"id":id,"status":"failed","error":err.to_string()}),
         },
         Err(err) => {
-            json!({"id":id,"status":"failed","error":err.to_string(),"monitoring":"unmonitored"})
+            let mut job = json!({"id":id,"status":"failed","error":err.to_string(),"monitoring":"unmonitored"});
+            if err
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|e| e.kind() == std::io::ErrorKind::StorageFull)
+            {
+                job["persistence_error"] = json!(err.to_string());
+            }
+            job
         }
     };
     record_job(&app, id, value);
-    app.busy.store(false, Ordering::SeqCst);
 }
 fn same_origin(headers: &HeaderMap) -> Result<(), Error> {
     if let Some(origin) = headers.get("origin") {
@@ -464,24 +1103,26 @@ async fn replay(
             ""
         }
     );
-    if !r.force
-        && app.results.read().unwrap().iter().any(|e| {
-            e.id == eid
-                && r.fault_receiver.as_ref().is_none_or(|id| {
-                    e.receivers.iter().any(|rx| {
-                        &rx.receiver.id == id
-                            && rx.reason.as_deref().is_some_and(|s| s.starts_with("TEST:"))
-                    })
-                })
+    let cached = app.db.emission(&eid).map_err(internal)?.is_some_and(|e| {
+        r.fault_receiver.as_ref().is_none_or(|id| {
+            e.receivers.iter().any(|rx| {
+                &rx.receiver.id == id
+                    && rx.reason.as_deref().is_some_and(|s| s.starts_with("TEST:"))
+            })
         })
-    {
+    });
+    if !r.force && cached {
         return Ok(Json(
             json!({"job_id":format!("cached-{eid}"),"cached":true}),
         ));
     }
     admin(&app, &headers)?;
-    let id = lock_job(&app)?;
-    tokio::spawn(finish(app, id.clone(), Ok(path), r.fault_receiver));
+    let (id, guard) = lock_job(&app)?;
+    let job_id = id.clone();
+    tokio::spawn(async move {
+        let _guard = guard;
+        finish(app, job_id, Ok(path), r.fault_receiver).await;
+    });
     Ok(Json(json!({"job_id":id})))
 }
 #[derive(Deserialize)]
@@ -504,8 +1145,8 @@ async fn start_capture(
         .ok_or(bad("Target not configured"))?;
     let mut config = (*app.config).clone();
     if let Some(ids) = r.source_ids {
-        if !(3..=8).contains(&ids.len()) {
-            return Err(bad("Select 3–8 independent receivers"));
+        if !(3..=pipeline::MAX_RECEIVERS).contains(&ids.len()) {
+            return Err(bad("Select 3–12 independent receivers"));
         }
         let guard = app.directory.read().unwrap();
         let d = guard.as_ref().ok_or(bad("Directory unavailable"))?;
@@ -523,27 +1164,27 @@ async fn start_capture(
         target.source_ids = ids;
     }
     capture::authorize(&config, &target).map_err(bad)?;
-    let id = lock_job(&app)?;
+    let (id, guard) = lock_job(&app)?;
     let job_id = id.clone();
     tokio::spawn(async move {
-        let result = capture::capture(&config, &target, Path::new("data/captures")).await;
+        let _guard = guard;
+        let result = capture::capture(&config, &target, Path::new("data/captures"), &app.db).await;
         finish(app, job_id, result, None).await;
     });
     Ok(Json(json!({"job_id":id})))
 }
+
 async fn job(State(app): State<App>, ApiPath(id): ApiPath<String>) -> Api<Value> {
     if let Some(eid) = id.strip_prefix("cached-") {
-        if app.results.read().unwrap().iter().any(|e| e.id == eid) {
+        if app.db.emission(eid).map_err(internal)?.is_some() {
             return Ok(Json(
                 json!({"id":id,"status":"completed","emission_id":eid,"cached":true}),
             ));
         }
     }
-    app.jobs
-        .read()
-        .unwrap()
-        .get(&id)
-        .cloned()
+    app.db
+        .job(&id)
+        .map_err(internal)?
         .map(Json)
         .ok_or(Error(StatusCode::NOT_FOUND, "Job not found".into()))
 }
@@ -578,27 +1219,131 @@ async fn review(
     if m.mode != "live" || m.id != r.capture_id {
         return Err(bad("Invalid capture"));
     }
+    if slot_profile(&m) {
+        return Err(bad(
+            "Slot-profile captures (IBP, FT8) are verified per transmission",
+        ));
+    }
     m.provenance = r.evidence;
     m.identity = r.identity;
     m.emission_verified = true;
     pipeline::validate_manifest(&m).map_err(bad)?;
-    let id = lock_job(&app)?;
+    let (id, guard) = lock_job(&app)?;
     if let Err(err) = store::atomic_json(&path, &m) {
         record_job(
             &app,
             id.clone(),
             json!({"id":id,"status":"failed","error":err.to_string()}),
         );
-        app.busy.store(false, Ordering::SeqCst);
         return Err(bad(err));
     }
-    tokio::spawn(finish(app, id.clone(), Ok(path), None));
+    let job_id = id.clone();
+    tokio::spawn(async move {
+        let _guard = guard;
+        finish(app, job_id, Ok(path), None).await;
+    });
     Ok(Json(json!({"job_id":id})))
+}
+
+/// Import the former JSON archive once, and refresh bundled replay results on every start.
+fn migrate(db: &Db) -> anyhow::Result<(usize, usize)> {
+    let mut imported = (0, 0);
+    if db.meta("legacy_json_import")?.is_none() {
+        imported = db.import_legacy(Path::new("data/results"), Path::new("data/jobs"))?;
+        db.set_meta("legacy_json_import", &Utc::now().to_rfc3339())?;
+    }
+    let mut replays = vec![];
+    for entry in std::fs::read_dir("data/results")
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        let path = entry.path();
+        if path.extension().is_some_and(|s| s == "json")
+            && !path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .is_some_and(|n| n.starts_with("live-") || n.ends_with("-slots.json"))
+        {
+            let e: Emission = serde_json::from_slice(&std::fs::read(&path)?)?;
+            if e.mode == "replay" {
+                // The native data volume may still hold the previous release's replay
+                // files. Refresh the bundled IDs in SQLite without altering that archive.
+                let current = match e.id.as_str() {
+                    "dcf77-20200813" => serde_json::from_slice(include_bytes!(
+                        "../data/results/dcf77-20200813.json"
+                    ))?,
+                    "dcf77-20200813-sync-loss" => serde_json::from_slice(include_bytes!(
+                        "../data/results/dcf77-20200813-sync-loss.json"
+                    ))?,
+                    _ => e,
+                };
+                replays.push(current);
+            }
+        }
+    }
+    db.put_emissions(&replays)?;
+    Ok(imported)
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args: Vec<_> = std::env::args().collect();
+    // An unknown word must never fall through to starting the server.
+    if let Some(cmd) = args.get(1) {
+        anyhow::ensure!(
+            [
+                "discover",
+                "process",
+                "capture",
+                "calibrate",
+                "ingest",
+                "import",
+                "stats"
+            ]
+            .contains(&cmd.as_str()),
+            "Unknown command {cmd}. Use: import [OBSERVATIONS.json] | stats [START END] | discover | process MANIFEST [FAULT_RECEIVER] | capture TARGET_ID | calibrate [ft8] | ingest DIR [--profile P] [--center HZ]"
+        );
+    }
+    if args.get(1).is_some_and(|v| v == "import") {
+        let db = Db::open(Path::new("data/meridian.sqlite"))?;
+        let (mut observations, jobs) = migrate(&db)?;
+        match &args[2..] {
+            [] => {}
+            [path] => {
+                let rows = serde_json::from_reader(std::fs::File::open(path)?)?;
+                observations += db.import_observations(rows)?;
+            }
+            _ => anyhow::bail!("import [OBSERVATIONS.json]"),
+        }
+        println!(
+            "{}",
+            json!({"imported_observations":observations,"imported_jobs":jobs})
+        );
+        return Ok(());
+    }
+    if args.get(1).is_some_and(|v| v == "stats") {
+        let (start, end) = match &args[2..] {
+            [] => {
+                let end = Utc::now();
+                (end - chrono::Duration::hours(24), end)
+            }
+            [start, end] => (start.parse()?, end.parse()?),
+            _ => anyhow::bail!("stats [START_UTC END_UTC]"),
+        };
+        anyhow::ensure!(
+            end.timestamp_millis() > start.timestamp_millis(),
+            "UTC interval must span at least one millisecond"
+        );
+        let db = Db::open(Path::new("data/meridian.sqlite"))?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(
+                &json!({"start":start,"end":end,"rows":evaluation::summary(&db,start,end)?})
+            )?
+        );
+        return Ok(());
+    }
     if args.get(1).is_some_and(|v| v == "discover") {
         let d = directory::refresh(Path::new("data/state/directory.json")).await?;
         println!(
@@ -607,12 +1352,91 @@ async fn main() -> anyhow::Result<()> {
         );
         return Ok(());
     }
+    if args.get(1).is_some_and(|v| v == "calibrate") && args.get(2).is_some_and(|v| v == "ft8") {
+        // Post-hoc only: FT8 observations against the locator each station sent.
+        let db = Db::open(Path::new("data/meridian.sqlite"))?;
+        let rows = db.emissions(&db::Query {
+            mode: "live".into(),
+            fault: false,
+            low_hz: 1e6,
+            high_hz: 60e6,
+            start_ms: 0,
+            end_ms: i64::MAX,
+            limit: 1_000_000,
+        })?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&meridian_tdoa::calibration::ft8(&rows))?
+        );
+        return Ok(());
+    }
+    if args.get(1).is_some_and(|v| v == "calibrate") {
+        // Post-hoc only: residuals of stored live DCF77 delays at the published PTB position.
+        let db = Db::open(Path::new("data/meridian.sqlite"))?;
+        let rows = db.emissions(&db::Query {
+            mode: "live".into(),
+            fault: false,
+            low_hz: 77_499.,
+            high_hz: 77_501.,
+            start_ms: 0,
+            end_ms: i64::MAX,
+            limit: 1_000_000,
+        })?;
+        let rows: Vec<_> = rows
+            .into_iter()
+            .filter(|e| {
+                e.reference
+                    .as_ref()
+                    .is_some_and(|r| r.profile == protocol::PROFILE)
+            })
+            .collect();
+        let truth: Point = serde_json::from_str(include_str!("../web/dcf77-reference.json"))?;
+        let report = json!({
+            "reference": truth,
+            "wgs84": meridian_tdoa::calibration::residuals(&rows, truth, geo::distance),
+            "sphere": meridian_tdoa::calibration::residuals(&rows, truth, geo::sphere_distance),
+            "solver": meridian_tdoa::calibration::solver(&rows, truth),
+            "formulations": meridian_tdoa::calibration::formulations(&rows, truth),
+        });
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
     if args.get(1).is_some_and(|v| v == "process") {
         let path = args
             .get(2)
             .ok_or_else(|| anyhow::anyhow!("process MANIFEST [FAULT_RECEIVER]"))?;
+        let m: Manifest = serde_json::from_slice(&std::fs::read(path)?)?;
+        let policy = if m.mode == "live" {
+            let path =
+                std::env::var("MERIDIAN_CONFIG").unwrap_or_else(|_| "config/app.json".into());
+            if Path::new(&path).is_file() || std::env::var_os("MERIDIAN_CONFIG").is_some() {
+                serde_json::from_slice::<Config>(&std::fs::read(path)?)?.retention
+            } else {
+                retention::Policy::default()
+            }
+        } else {
+            retention::Policy::default()
+        };
+        if slot_profile(&m) {
+            anyhow::ensure!(
+                args.get(3).is_none(),
+                "Fault injection is available for replays"
+            );
+            let db = Db::open(Path::new("data/meridian.sqlite"))?;
+            let (rows, summary) = process_ibp(&db, Path::new(path), &m.id)?;
+            if m.mode == "live" {
+                retire_capture(&policy, Path::new(path), worth_keeping(&rows));
+            }
+            println!("{}", serde_json::to_string_pretty(&summary)?);
+            return Ok(());
+        }
         let e = pipeline::process(Path::new(path), args.get(3).map(String::as_str))?;
-        pipeline::save(&e, Path::new("data/results"))?;
+        if e.mode == "live" {
+            Db::open(Path::new("data/meridian.sqlite"))?.put_emissions(std::slice::from_ref(&e))?;
+            retire_capture(&policy, Path::new(path), e.detected);
+        } else {
+            pipeline::save(&e, Path::new("data/results"))?;
+        }
         println!("{}", serde_json::to_string_pretty(&e)?);
         return Ok(());
     }
@@ -623,22 +1447,152 @@ async fn main() -> anyhow::Result<()> {
         Path::new("data/state/storage-check.json"),
         &json!({"checked_at":Utc::now().to_rfc3339()}),
     )?;
+    if args.get(1).is_some_and(|v| v == "ingest") {
+        // ingest DIR [--profile correlated_v1|ft8_v1] [--center HZ]: SigMF recordings, one per node.
+        let dir = args
+            .get(2)
+            .ok_or_else(|| anyhow::anyhow!("ingest DIR [--profile P] [--center HZ]"))?;
+        let flag = |name: &str| {
+            args.iter()
+                .position(|a| a == name)
+                .and_then(|i| args.get(i + 1))
+        };
+        let profile = flag("--profile")
+            .map(String::as_str)
+            .unwrap_or(meridian_tdoa::channel::PROFILE);
+        let center = flag("--center").map(|v| v.parse::<f64>()).transpose()?;
+        let manifest = meridian_tdoa::sigmf::ingest(
+            Path::new(dir),
+            Path::new("data/captures"),
+            profile,
+            center,
+            config.gps_utc_offset_s,
+        )?;
+        let db = Db::open(Path::new("data/meridian.sqlite"))?;
+        let m: Manifest = serde_json::from_slice(&std::fs::read(&manifest)?)?;
+        let (rows, summary) = process_ibp(&db, &manifest, &m.id)?;
+        retire_capture(&config.retention, &manifest, worth_keeping(&rows));
+        println!("{}", serde_json::to_string_pretty(&summary)?);
+        return Ok(());
+    }
     if args.get(1).is_some_and(|v| v == "capture") {
-        let target = config
+        // capture TARGET_ID [--directory N [--near LAT,LON]]
+        let mut target = config
             .targets
             .iter()
             .find(|t| Some(&t.id) == args.get(2))
-            .ok_or_else(|| anyhow::anyhow!("capture TARGET_ID (from MERIDIAN_CONFIG)"))?;
-        let manifest = capture::capture(&config, target, Path::new("data/captures")).await?;
+            .cloned()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "capture TARGET_ID [--sources ID,… | --directory N [--near LAT,LON]]"
+                )
+            })?;
+        let mut cfg = config.clone();
+        let flag = |name: &str| {
+            args.iter()
+                .position(|a| a == name)
+                .and_then(|i| args.get(i + 1))
+        };
+        if let Some(ids) = flag("--sources") {
+            let d = directory::load(Path::new("data/state/directory.json"))?;
+            cfg.sources = ids
+                .split(',')
+                .map(|id| {
+                    d.receivers
+                        .iter()
+                        .find(|r| r.id == id)
+                        .ok_or_else(|| anyhow::anyhow!("{id} is not in the directory"))?
+                        .source(&d.fetched_at)
+                })
+                .collect::<anyhow::Result<_>>()?;
+            target.source_ids = cfg.sources.iter().map(|s| s.id.clone()).collect();
+        } else if let Some(n) = flag("--directory") {
+            let d = directory::load(Path::new("data/state/directory.json"))?;
+            let n: usize = n.parse()?;
+            let center = capture::iq_center(&target);
+            let db = Db::open(Path::new("data/meridian.sqlite"))?;
+            let mut excluded = db.unusable_receivers(
+                Utc::now().timestamp_millis(),
+                &cfg.receivers,
+                target.duration_s as f64,
+            )?;
+            let reception = db.reception(
+                &channel_key(target.frequency_hz),
+                Utc::now().timestamp_millis(),
+            )?;
+            excluded.extend(reception.quiet);
+            let round = match flag("--near") {
+                Some(p) => {
+                    let (lat, lon) = p
+                        .split_once(',')
+                        .ok_or_else(|| anyhow::anyhow!("--near LAT,LON"))?;
+                    d.anchor_near(
+                        center,
+                        Point {
+                            lat: lat.parse()?,
+                            lon: lon.parse()?,
+                        },
+                        &excluded,
+                    )?
+                }
+                None => 0,
+            };
+            cfg.sources = if flag("--near").is_none() {
+                d.network_heard(
+                    center,
+                    round,
+                    n,
+                    &excluded,
+                    target.min_spacing_km.unwrap_or(150.),
+                    &reception.strength_db,
+                )?
+            } else {
+                d.network_spaced(
+                    center,
+                    round,
+                    n,
+                    &excluded,
+                    target.min_spacing_km.unwrap_or(150.),
+                )?
+            };
+            target.source_ids = cfg.sources.iter().map(|s| s.id.clone()).collect();
+        }
+        let db = Db::open(Path::new("data/meridian.sqlite"))?;
+        let manifest = capture::capture(&cfg, &target, Path::new("data/captures"), &db).await?;
         println!("{}", manifest.display());
         return Ok(());
     }
-    let mut results = vec![];
-    std::fs::create_dir_all("data/results")?;
-    for entry in std::fs::read_dir("data/results")? {
-        let path = entry?.path();
-        if path.extension().is_some_and(|s| s == "json") {
-            results.push(serde_json::from_slice(&std::fs::read(path)?)?);
+    let db = Arc::new(Db::open(Path::new("data/meridian.sqlite"))?);
+    let interrupted = db.interrupt_running()?;
+    if interrupted > 0 {
+        eprintln!("{interrupted} unfinished job(s) marked interrupted");
+    }
+    // Bundled replay results always reflect the shipped files; live JSON is imported once.
+    let (imported, imported_jobs) = migrate(&db)?;
+    if imported + imported_jobs > 0 {
+        eprintln!(
+            "Imported {imported} observation(s) and {imported_jobs} job(s) into data/meridian.sqlite"
+        );
+    }
+    // Recover only a known IBP capture saved before its slot bundle was stored.
+    if let Ok(captures) = std::fs::read_dir("data/captures") {
+        for entry in captures.flatten() {
+            let path = entry.path().join("manifest.json");
+            let Some(m) = std::fs::read(&path)
+                .ok()
+                .and_then(|b| serde_json::from_slice::<Manifest>(&b).ok())
+            else {
+                continue;
+            };
+            if !slot_profile(&m)
+                || entry.file_name().to_str() != Some(m.id.as_str())
+                || db.has_dataset(&m.id)?
+            {
+                continue;
+            }
+            if let Err(err) = process_ibp(&db, &path, &m.id) {
+                eprintln!("Could not process IBP capture {}: {err}", m.id);
+            }
         }
     }
     let mut datasets = vec![];
@@ -658,11 +1612,25 @@ async fn main() -> anyhow::Result<()> {
     let listen = std::env::var("PORT")
         .map(|p| format!("0.0.0.0:{p}"))
         .unwrap_or_else(|_| config.listen.clone());
+    let parallel = config.max_parallel_jobs.max(1);
+    let network = meridian_tdoa::sync::Network {
+        master: config
+            .nodes
+            .iter()
+            .filter(|n| n.disciplined)
+            .map(|n| n.id.clone())
+            .min(),
+        ..Default::default()
+    };
     let app = App {
         config: Arc::new(config),
-        results: Arc::new(RwLock::new(results)),
-        jobs: Arc::new(RwLock::new(store::recover_jobs(Path::new("data/jobs"))?)),
-        busy: Arc::new(AtomicBool::new(false)),
+        db,
+        persistence_failures: Arc::new(Mutex::new(HashSet::new())),
+        workers: Arc::new(tokio::sync::Semaphore::new(parallel)),
+        leases: Arc::new(Mutex::new(HashSet::new())),
+        clocks: Arc::new(Mutex::new(network)),
+        pending: Arc::new(Mutex::new(HashMap::new())),
+        events: tokio::sync::broadcast::channel(64).0,
         datasets: Arc::new(datasets),
         token: Arc::new(
             std::env::var("MERIDIAN_ADMIN_TOKEN_FILE")
@@ -677,6 +1645,7 @@ async fn main() -> anyhow::Result<()> {
         )),
         directory_refreshing: Arc::new(AtomicBool::new(false)),
         stopping: Arc::new(AtomicBool::new(false)),
+        monitor: Arc::new(RwLock::new(monitor::Status::default())),
     };
     let directory_app = app.clone();
     if std::env::var("MERIDIAN_DIRECTORY_OFFLINE").as_deref() != Ok("1") {
@@ -701,18 +1670,148 @@ async fn main() -> anyhow::Result<()> {
             }
         });
     }
+    let push_app = app.clone();
+    tokio::spawn(async move {
+        let mut last = None;
+        while !push_app.stopping.load(Ordering::SeqCst) {
+            if let Ok(marker) = push_app.db.change_marker() {
+                if last != Some(marker) {
+                    if last.is_some() {
+                        let (start, rows, track, _) = marker;
+                        let _ = push_app.events.send(
+                            json!({"latest_live":start.and_then(DateTime::from_timestamp_millis),"live_rows":rows,
+                                "tracks_updated":track.and_then(DateTime::from_timestamp_millis)}).to_string(),
+                        );
+                    }
+                    last = Some(marker);
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+    });
+    let settle_app = app.clone();
+    tokio::spawn(async move {
+        while !settle_app.stopping.load(Ordering::SeqCst) {
+            settle_detections(&settle_app);
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+    });
+    let inbox_app = app.clone();
+    tokio::spawn(async move {
+        // data/inbox/<event>/ with *.sigmf-meta + *.sigmf-data and an empty READY file.
+        loop {
+            if inbox_app.stopping.load(Ordering::SeqCst) {
+                break;
+            }
+            let ready: Vec<PathBuf> = std::fs::read_dir("data/inbox")
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.join("READY").is_file())
+                .collect();
+            for event in ready {
+                let profile = std::fs::read_to_string(event.join("READY")).unwrap_or_default();
+                let profile = match profile.trim() {
+                    "" => meridian_tdoa::channel::PROFILE.to_string(),
+                    p => p.to_string(),
+                };
+                let app = inbox_app.clone();
+                let offset = app.config.gps_utc_offset_s;
+                let outcome = tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
+                    let run = || -> anyhow::Result<Value> {
+                        let manifest = meridian_tdoa::sigmf::ingest(
+                            &event,
+                            Path::new("data/captures"),
+                            &profile,
+                            None,
+                            offset,
+                        )?;
+                        let m: Manifest = serde_json::from_slice(&std::fs::read(&manifest)?)?;
+                        let (rows, summary) = process_ibp(&app.db, &manifest, &m.id)?;
+                        retire_capture(&app.config.retention, &manifest, worth_keeping(&rows));
+                        Ok(summary)
+                    };
+                    match run() {
+                        Ok(summary) => {
+                            std::fs::remove_dir_all(&event)?;
+                            Ok(summary)
+                        }
+                        Err(e) => {
+                            // Never retried automatically: kept with the reason for the operator.
+                            let failed = Path::new("data/inbox-failed")
+                                .join(event.file_name().unwrap_or_default());
+                            std::fs::create_dir_all("data/inbox-failed")?;
+                            std::fs::rename(&event, &failed)?;
+                            std::fs::write(failed.join("ERROR.txt"), e.to_string())?;
+                            Err(e)
+                        }
+                    }
+                })
+                .await;
+                match outcome {
+                    Ok(Ok(summary)) => eprintln!("Inbox event ingested: {summary}"),
+                    Ok(Err(e)) => eprintln!("Inbox event rejected: {e}"),
+                    Err(e) => eprintln!("Inbox worker failed: {e}"),
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+        }
+    });
+    let retention_app = app.clone();
+    tokio::spawn(async move {
+        loop {
+            if retention_app.stopping.load(Ordering::SeqCst) {
+                break;
+            }
+            let policy = retention_app.config.retention.clone();
+            let db = retention_app.db.clone();
+            let outcome = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+                let iq = retention::sweep(Path::new("data/captures"), &policy, Utc::now())?;
+                let rows = db.prune(&policy, Utc::now().timestamp_millis())?;
+                Ok((iq, rows))
+            })
+            .await;
+            match outcome {
+                Ok(Ok((iq, (results, jobs))))
+                    if iq.iq_files_deleted + iq.capture_dirs_deleted + results + jobs > 0 =>
+                {
+                    eprintln!(
+                        "Retention: {} IQ file(s), {} byte(s), {} capture dir(s), {results} result(s), {jobs} job(s) removed",
+                        iq.iq_files_deleted, iq.iq_bytes_deleted, iq.capture_dirs_deleted
+                    )
+                }
+                Ok(Err(e)) => eprintln!("Retention failed: {e}"),
+                _ => {}
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+        }
+    });
     let shutdown_app = app.clone();
+    let monitor_target = monitor::configured_targets(&app.config)?;
     let router = Router::new()
         .route(
             "/api/health",
             get(|| async { Json(json!({"status":"ok"})) }),
         )
         .route("/api/info", get(info))
+        .route("/api/beacons", get(beacons))
         .route("/api/ready", get(ready))
         .route("/api/sources", get(source_directory))
         .route("/api/directory/refresh", post(update_directory))
         .route("/api/emissions", get(emissions))
         .route("/api/emissions/{id}", get(detail))
+        .route("/api/emissions/{id}/evaluation", get(evaluate_observation))
+        .route("/api/tracks", get(tracks))
+        .route("/api/stats", get(stats))
+        .route("/api/tracks/{key}", get(track_detail))
+        .route("/api/receivers/health", get(receiver_health))
+        .route(
+            "/api/detections",
+            post(detections).layer(axum::extract::DefaultBodyLimit::max(262_144)),
+        )
+        .route("/api/clocks", get(clock_state))
+        .route("/api/stream", get(stream))
         .route("/api/replay", post(replay))
         .route("/api/capture", post(start_capture))
         .route("/api/review", post(review))
@@ -722,6 +1821,9 @@ async fn main() -> anyhow::Result<()> {
         .layer(axum::middleware::from_fn(headers))
         .layer(axum::extract::DefaultBodyLimit::max(16384));
     let listener = tokio::net::TcpListener::bind(&listen).await?;
+    if let Some((settings, target)) = monitor_target {
+        tokio::spawn(monitor::run(shutdown_app.clone(), settings, target));
+    }
     println!("Meridian · http://{listen}");
     axum::serve(listener, router)
         .with_graceful_shutdown(async move {
@@ -730,9 +1832,10 @@ async fn main() -> anyhow::Result<()> {
                     .expect("SIGTERM handler");
             tokio::select! {_=tokio::signal::ctrl_c()=>(),_=terminate.recv()=>()}
             shutdown_app.stopping.store(true, Ordering::SeqCst);
+            let _ = shutdown_app.events.send(SHUTDOWN_EVENT.into());
             // Let the bounded capture/processing finish. After a forced stop the durable job is recovered as interrupted.
             for _ in 0..180 {
-                if !shutdown_app.busy.load(Ordering::SeqCst) {
+                if !busy(&shutdown_app) {
                     break;
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;

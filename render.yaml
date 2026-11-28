@@ -1,4 +1,5 @@
-# Render Free: testing only. Captures/jobs are lost on restart or spin-down.
+# Render Free: testing only. Captures/jobs are lost on restart, redeploy or spin-down.
+# Each commit on the linked branch deploys after all of its GitHub checks pass.
 # This file creates no paid disk or database. See docs/RENDER.md before deployment.
 services:
   - type: web
@@ -9,7 +10,7 @@ services:
     dockerfilePath: ./Dockerfile
     dockerContext: .
     healthCheckPath: /api/ready
-    autoDeployTrigger: "off"
+    autoDeployTrigger: checksPass
     envVars:
       - key: PORT
         value: "3000"

@@ -28,7 +28,7 @@ def main():
     attempted = set()
     attempt_lock = threading.Lock()
     original = socket.create_connection
-    proxy = os.environ.get('HTTP_PROXY') or os.environ.get('http_proxy')
+    proxy = os.environ.get('HTTP_PROXY') or os.environ.get('http_proxy') or os.environ.get('ALL_PROXY') or os.environ.get('all_proxy')
 
     def connect(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_address=None, **kwargs):
         host, port = address
@@ -54,6 +54,23 @@ def main():
         return tunnel.sock
 
     socket.create_connection = connect
+    # KiwiClient logs server refusal messages (per-IP time limit, busy, down, bad password) only at
+    # debug level. Echo just those, one line each, so Meridian can respect them without verbose logs.
+    import logging
+    debug = logging.debug
+
+    def refusal_aware_debug(msg, *a, **kw):
+        text = str(msg) % a if a else str(msg)
+        for key in ('ip_limit', 'too_busy', 'badp', 'down', 'redirect', 'inactivity_timeout'):
+            if (' %s:' % key) in text or text.rstrip().endswith(' ' + key):
+                rest = text.split(key, 1)[1].strip(': ').split()
+                if key == 'badp' and rest[:1] == ['0']:
+                    continue
+                sys.stderr.write('MERIDIAN-REFUSAL %s %s\n' % (key, rest[0] if rest else ''))
+                sys.stderr.flush()
+        return debug(msg, *a, **kw)
+
+    logging.debug = refusal_aware_debug
     sys.argv[0] = recorder
     sys.path.insert(0, str(Path(recorder).parent))
     runpy.run_path(recorder, run_name='__main__')
