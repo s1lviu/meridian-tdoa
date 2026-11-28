@@ -59,6 +59,58 @@ function setStatus(text, level = "ok") {
   s.innerHTML = `<span class="dot"></span>${esc(text)}`;
 }
 
+// Countdown to the scheduler's next capture window, from the small /api/monitor snapshot.
+// When a window starts the scheduler announces the following one, so the page asks again;
+// receivers are never contacted from here.
+const monitor = { configured: false, nextAt: 0, targets: [], notice: null, skew: 0, polledAt: 0, polls: 0 };
+async function loadMonitor() {
+  monitor.polledAt = Date.now();
+  try {
+    const r = await fetch("/api/monitor");
+    if (r.ok) {
+      // HTTP dates have one-second resolution: correct only a clearly wrong local clock.
+      const server = Date.parse(r.headers.get("date") || "");
+      const skew = isFinite(server) ? server - Date.now() : 0;
+      monitor.skew = Math.abs(skew) > 2000 ? skew : 0;
+      const o = await r.json();
+      const nextAt = o?.next_at ? Date.parse(o.next_at) : 0;
+      if (nextAt > Date.now() + monitor.skew) monitor.polls = 0;
+      Object.assign(monitor, { configured: !!o, nextAt, targets: o?.next_target_ids || [], notice: o?.notice || null });
+    }
+  } catch { /* keep the last known schedule */ }
+  tick();
+}
+const clock = (ms) => {
+  const s = Math.max(0, Math.ceil(ms / 1000));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+};
+function tick() {
+  const el = $("next-window");
+  if (state.mode !== "live" || !monitor.configured || (!monitor.nextAt && !monitor.notice)) {
+    el.hidden = true;
+    return;
+  }
+  el.hidden = false;
+  if (!monitor.nextAt) {
+    el.className = "next-window paused";
+    el.textContent = el.title = monitor.notice;
+    return;
+  }
+  const left = monitor.nextAt - (Date.now() + monitor.skew);
+  const targets = monitor.targets.length ? `<span class="targets"> · ${esc(monitor.targets.join(", "))}</span>` : "";
+  el.className = "next-window";
+  el.title = `Scheduled for ${utc(monitor.nextAt)}${monitor.notice ? " · " + monitor.notice : ""}`;
+  if (left > 0) {
+    el.innerHTML = `Next window in <b>${clock(left)}</b>${targets}`;
+  } else {
+    el.innerHTML = `Window starting…${targets}`;
+    if (Date.now() - monitor.polledAt > 2000 && monitor.polls < 30) {
+      monitor.polls++;
+      loadMonitor();
+    }
+  }
+}
+
 // 95% ellipse from the registry (semi-axes in km, azimuth of the major axis from north).
 function ellipse(center, major, minor, az) {
   const pts = [];
@@ -161,7 +213,10 @@ async function refresh() {
     const scope = [state.mode, band, profile, $("window").value].join("/");
     const q = `mode=${state.mode}&compact=true&start=${start}&end=${end}&band=${band}&scenario=${state.scenario}`;
     const tasks = [api(`/api/emissions?${q}`)];
-    if (state.mode === "live") tasks.push(api(`/api/tracks?since=${start}&band=${band}`), api(`/api/stats?start=${start}&end=${end}`));
+    if (state.mode === "live") {
+      tasks.push(api(`/api/tracks?since=${start}&band=${band}`), api(`/api/stats?start=${start}&end=${end}`));
+      loadMonitor();
+    }
     const [data, tracks, stats] = await Promise.all(tasks);
     if (scope !== [state.mode, $("band").value, $("profile").value, $("window").value].join("/")) { state.pending = true; return; }
     state.data = data;
@@ -175,8 +230,7 @@ async function refresh() {
     if (state.mode === "live") measureMap(scope);
     if (state.mode === "live") {
       const obs = data.monitoring?.segments?.length || 0;
-      const next = data.observatory?.next_at ? ` · next window ${utc(data.observatory.next_at).slice(11, 19)}` : data.observatory?.notice ? ` · ${data.observatory.notice}` : "";
-      setStatus(`${obs} observation(s) in window · ${state.tracks.length} located${next}`, state.stream === "open" ? "ok" : "warn");
+      setStatus(`${obs} observation(s) in window · ${state.tracks.length} located`, state.stream === "open" ? "ok" : "warn");
     }
     if (state.mode === "replay" && !state.selected) {
       const first = data.emissions[0] || data.unlocated[0];
@@ -361,6 +415,7 @@ function setMode(mode) {
   $("mode-badge").className = `badge ${mode === "live" ? "live" : "replay"}`;
   $("replay-card").hidden = mode !== "replay";
   if (mode === "replay") setStatus("Archived recording", "ok");
+  tick();
   refresh();
 }
 
@@ -456,4 +511,5 @@ async function boot() {
 }
 // Fallback refresh when push updates are unavailable; receivers are never contacted from here.
 setInterval(() => { if (state.mode === "live" && !document.hidden && state.stream !== "open") refresh(); }, 30000);
+setInterval(tick, 1000);
 boot();

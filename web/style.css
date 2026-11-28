@@ -32,7 +32,12 @@ select, input[type="text"], input[type="password"], input[type="url"] { backgrou
 .modes { display: flex; border: 1px solid var(--line); border-radius: 9px; overflow: hidden; }
 .modes button { border: 0; border-radius: 0; background: transparent; }
 .modes button[aria-selected="true"] { background: #1d3b33; color: #e7fff6; }
-.status { margin-left: auto; color: var(--muted); font: 12px var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.status-line { margin-left: auto; display: flex; align-items: center; gap: 14px; min-width: 0; }
+.status { color: var(--muted); font: 12px var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.next-window { font: 12px var(--mono); color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 64ch; flex: none; }
+.next-window b { color: var(--accent); font-weight: 650; font-variant-numeric: tabular-nums; }
+.next-window .targets { color: var(--muted); }
+.next-window.paused { color: var(--warn); flex: 0 1 auto; }
 .status .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); margin-right: 6px; vertical-align: middle; }
 .status.ok .dot { background: var(--accent); }
 .status.warn .dot { background: var(--warn); }
@@ -75,6 +80,9 @@ table.stats { width: 100%; border-collapse: collapse; font-size: 11.5px; }
 table.stats th, table.stats td { padding: 4px 6px; border-bottom: 1px solid var(--line); text-align: right; white-space: nowrap; }
 table.stats th:first-child, table.stats td:first-child { text-align: left; }
 table.stats th { color: var(--muted); font-weight: 500; }
+/* The row label stays visible while the wide statistics table scrolls sideways. */
+.card table.stats th:first-child, .card table.stats td:first-child { position: sticky; left: 0; background: var(--card); box-shadow: 1px 0 0 var(--line); }
+table.stats td.note { white-space: normal; text-align: left; min-width: 18em; }
 .buttons { display: flex; gap: 8px; flex-wrap: wrap; }
 .replay p { margin: 0 0 8px; color: var(--muted); font-size: 12px; }
 
@@ -113,11 +121,27 @@ dialog::backdrop { background: rgba(0, 0, 0, .55); }
 .rx-icon.heard { border-color: var(--fix); }
 .tx-label { color: #e8fff7; font: 650 11px system-ui; text-shadow: 0 0 3px #000, 0 0 6px #000; white-space: nowrap; }
 
+/* Leaflet's light controls restyled for the dark map. */
+.leaflet-bar, .leaflet-touch .leaflet-bar { border: 1px solid var(--line); box-shadow: none; }
+.leaflet-bar a { background: var(--card); color: var(--text); border-bottom-color: var(--line); }
+.leaflet-bar a:hover, .leaflet-bar a:focus { background: #1a2a35; color: #fff; }
+.leaflet-bar a.leaflet-disabled { background: var(--panel); color: #4a5d69; }
+.leaflet-container .leaflet-control-scale-line { background: rgba(17, 27, 35, .85); color: var(--muted); border-color: var(--muted); text-shadow: none; }
+.leaflet-container .leaflet-control-attribution { background: rgba(17, 27, 35, .85); color: var(--muted); }
+.leaflet-container .leaflet-control-attribution a { color: var(--muted); }
+
+.credit { margin-top: auto; padding: 2px 4px 0; font-size: 11px; color: #5f7684; }
+.credit a { color: inherit; text-decoration-color: var(--line); }
+.credit a:hover { color: var(--text); }
+
 @media (max-width: 860px) {
-  .layout { grid-template-columns: 1fr; height: auto; }
+  /* minmax(0, …): the wide statistics table scrolls inside its card instead of widening the page. */
+  .layout { grid-template-columns: minmax(0, 1fr); height: auto; }
+  .topbar { flex-wrap: wrap; row-gap: 6px; }
+  #help { margin-left: auto; }
+  .status-line { order: 3; flex: 1 1 100%; margin-left: 0; justify-content: space-between; }
   .map-card { height: 62vh; }
   .panel { border-left: 0; border-top: 1px solid var(--line); overflow: visible; }
-  .status { display: none; }
   .filters { grid-template-columns: 1fr 1fr; }
   .legend { display: none; }
   .inspector { top: auto; bottom: 0; left: 0; width: 100vw; max-height: 60vh; border-radius: 12px 12px 0 0; }
@@ -126,4 +150,5 @@ dialog::backdrop { background: rgba(0, 0, 0, .55); }
   .topbar { gap: 8px; padding: 8px 10px; }
   .brand small { display: none; }
   .filters { grid-template-columns: 1fr; }
+  .next-window .targets { display: none; }
 }
