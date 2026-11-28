@@ -724,6 +724,11 @@ async fn info(State(app): State<App>) -> Json<Value> {
         json!({"name":"Meridian","version":env!("CARGO_PKG_VERSION"),"live_enabled":app.config.live_enabled,"band_ranges_mhz":bands::BANDS,"admin_configured":app.token.is_some(),"sources":app.config.sources,"targets":app.config.targets,"pending_captures":pending_captures(),"busy":busy(&app),"latest_live":app.db.latest_live_start().ok().flatten().and_then(DateTime::from_timestamp_millis),"datasets":app.datasets.iter().map(|(m,_)|m).collect::<Vec<_>>(),"policy":"Public beacons, participating stations and the public DCF77 time reference for commissioning. Identity is not inferred from frequency or position."}),
     )
 }
+/// Scheduler state alone (next window, its targets, pause notice), cheap enough to poll
+/// for the map's countdown. `null` when no monitor is configured.
+async fn monitor_status(State(app): State<App>) -> Json<Value> {
+    Json(monitor::snapshot(&app))
+}
 #[derive(Default, Deserialize)]
 struct SourceQuery {
     offset: Option<usize>,
@@ -1795,6 +1800,7 @@ async fn main() -> anyhow::Result<()> {
             get(|| async { Json(json!({"status":"ok"})) }),
         )
         .route("/api/info", get(info))
+        .route("/api/monitor", get(monitor_status))
         .route("/api/beacons", get(beacons))
         .route("/api/ready", get(ready))
         .route("/api/sources", get(source_directory))

@@ -318,6 +318,13 @@ pub struct ReceiverOutcome {
     pub block_s: f64,
 }
 
+/// An error with its causes, e.g. "error sending request for url (…): client error (Connect):
+/// tcp connect error: Connection refused (os error 111)". The outermost message alone names
+/// only the URL, which hid why receivers failed.
+fn describe(e: &anyhow::Error) -> String {
+    format!("{e:#}")
+}
+
 /// Outcomes of a capture directory: preflight errors, IQ delivered, and receiver refusals
 /// reported by KiwiClient (per-IP time limit, busy, down, bad password).
 pub fn outcomes(dir: &Path, duration_s: u64) -> Vec<ReceiverOutcome> {
@@ -357,13 +364,18 @@ pub fn outcomes(dir: &Path, duration_s: u64) -> Vec<ReceiverOutcome> {
             .find_map(|l| l.strip_prefix("MERIDIAN-REFUSAL "))
             .map(|r| r.split_once(' ').map_or((r, ""), |(k, v)| (k, v)));
         let (reason, block_s) = match refusal {
-            Some(("ip_limit", v)) => (
-                format!(
-                    "Receiver per-IP time limit reached ({} min per 24 h)",
-                    v.split("%2c").next().unwrap_or("?")
-                ),
-                86_400.,
-            ),
+            Some(("ip_limit", v)) => {
+                // The minutes lead the value. What follows (an encoded separator and the IP the
+                // receiver saw) differs between transports and older logs, and is not needed.
+                let minutes: String = v.chars().take_while(char::is_ascii_digit).collect();
+                (
+                    format!(
+                        "Receiver per-IP time limit reached ({} min per 24 h)",
+                        if minutes.is_empty() { "?" } else { &minutes }
+                    ),
+                    86_400.,
+                )
+            }
             Some(("too_busy", _)) => ("All receiver channels busy".into(), 600.),
             Some(("down", _)) => ("Receiver reports it is down".into(), 3600.),
             Some(("badp", _)) => (
@@ -544,7 +556,7 @@ async fn record_iq(capture: &Capture) -> Result<PathBuf> {
                 checks.push(json!({"source":canonical,"observation":observation}));
                 available.push(canonical);
             }
-            Err(e) => checks.push(json!({"source":s,"error":e.to_string()})),
+            Err(e) => checks.push(json!({"source":s,"error":describe(&e)})),
         }
     }
     crate::store::atomic_json(&dir.join("source-checks.json"), &checks)?;
@@ -659,7 +671,7 @@ async fn record_iq(capture: &Capture) -> Result<PathBuf> {
         let (s, status) = result?;
         let file = dir.join(format!("capture_{}.wav", s.id));
         if status.is_err() || !file.is_file() || std::fs::metadata(&file)?.len() < 44 {
-            outcomes.push(json!({"receiver":s.id,"captured":false,"error":status.err().map(|e|e.to_string()).unwrap_or("No IQ received".into())}));
+            outcomes.push(json!({"receiver":s.id,"captured":false,"error":status.err().map(|e|describe(&e)).unwrap_or("No IQ received".into())}));
             continue;
         }
         ensure!(
@@ -711,7 +723,7 @@ async fn record_iq(capture: &Capture) -> Result<PathBuf> {
         if let Err(e) = crate::protocol::verify(&path) {
             crate::store::atomic_json(
                 &dir.join("verification-error.json"),
-                &json!({"error":e.to_string()}),
+                &json!({"error":describe(&e)}),
             )?;
         }
     }
@@ -781,5 +793,54 @@ mod tests {
                 .unwrap()
                 .contains_key("op_email")
         );
+    }
+
+    #[test]
+    fn per_ip_limit_minutes_are_read_from_every_transport_log_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs = [
+            ("native", "MERIDIAN-REFUSAL ip_limit 120\n"),
+            ("kiwiclient", "MERIDIAN-REFUSAL ip_limit 120%2c127.0.0.1\n"),
+            // The native transport before this fix, as recorded on Render on 28 November 2026.
+            ("legacy", "MERIDIAN-REFUSAL ip_limit 120%2127001\n"),
+        ];
+        let rows: Vec<Value> = logs
+            .iter()
+            .map(|(id, _)| json!({"receiver":id,"captured":false,"error":"Receiver refused the recording (ip_limit)"}))
+            .collect();
+        std::fs::write(
+            dir.path().join("capture-outcomes.json"),
+            serde_json::to_vec(&rows).unwrap(),
+        )
+        .unwrap();
+        for (id, log) in logs {
+            std::fs::write(dir.path().join(format!("{id}.log")), log).unwrap();
+        }
+        let found = outcomes(dir.path(), 30);
+        assert_eq!(found.len(), 3);
+        for o in found {
+            assert!(!o.ok);
+            assert_eq!(
+                o.reason.as_deref(),
+                Some("Receiver per-IP time limit reached (120 min per 24 h)"),
+                "{}",
+                o.id
+            );
+            assert_eq!(o.block_s, 86_400.);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_request_is_described_with_its_cause() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let err = reqwest::Client::new()
+            .get(format!("http://127.0.0.1:{port}/status"))
+            .send()
+            .await
+            .unwrap_err();
+        let text = describe(&err.into());
+        assert!(text.contains("Connection refused"), "{text}");
     }
 }

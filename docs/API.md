@@ -6,6 +6,7 @@ JSON over the same origin as the map. Times are RFC 3339 UTC. Request bodies are
 |---|---|---|
 | GET | `/api/health`, `/api/ready` | Process health; readiness with version, `busy` and free workers |
 | GET | `/api/info` | Public configuration, targets, bundled recordings, newest live observation |
+| GET | `/api/monitor` | Scheduler state only: `next_at`, `next_target_ids`, `interval_s`, pause `notice`, `last_jobs`; `null` without a monitor |
 | GET | `/api/tracks` | Emitter registry: fused positions with 95% ellipses (`since`, `band`, `bbox`) |
 | GET | `/api/tracks/{key}` | One emitter with its contributing observations |
 | GET | `/api/emissions` | Observations by time, band, mode and viewport |
@@ -51,6 +52,8 @@ Each estimate carries `center`, the 95% `polygon` and `radius_km`, `residual_us`
 ## Push updates
 
 `GET /api/stream` is an `EventSource` stream. Each `change` event carries `{"latest_live", "live_rows", "tracks_updated"}`; the map refreshes on it instead of polling. Streams end when the server shuts down.
+
+The map's countdown reads `GET /api/monitor`, the same scheduler snapshot as `observatory` in `/api/emissions`. When `next_at` has passed, the scheduler is starting that window and has not yet announced the following one, so the map asks again every 2 s, at most 30 times. With `next_at: null`, a `notice` explains why the monitor paused.
 
 ## Node detections
 

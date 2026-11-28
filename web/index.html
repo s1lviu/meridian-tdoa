@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Meridian TDoA</title>
     <meta name="description" content="Transmitters located from our own SDR captures by time difference of arrival." />
+    <meta name="author" content="Silviu YO6SAY" />
     <link rel="stylesheet" href="/vendor/leaflet/leaflet.css" />
     <link rel="stylesheet" href="/style.css" />
     <script defer src="/vendor/leaflet/leaflet.js"></script>
@@ -18,7 +19,10 @@
         <button id="mode-live" role="tab" aria-selected="true">Live</button>
         <button id="mode-replay" role="tab" aria-selected="false">Recording</button>
       </div>
-      <div class="status" id="status" role="status" aria-live="polite">Connecting…</div>
+      <div class="status-line">
+        <div class="status" id="status" role="status" aria-live="polite">Connecting…</div>
+        <span id="next-window" class="next-window" role="timer" hidden></span>
+      </div>
       <button id="help" class="icon-button" title="Method and limits" aria-label="Method and limits"><i data-lucide="circle-help"></i></button>
     </header>
 
@@ -80,7 +84,7 @@
         <section class="card" aria-labelledby="located-title">
           <h2 id="located-title">Located emitters <small id="located-count">0</small></h2>
           <ol id="track-list" class="list"></ol>
-          <p class="empty" id="track-empty">No transmitter located in this window yet.</p>
+          <p class="empty" id="track-empty">No transmitter located in this window yet. A position needs at least four receivers around the transmitter.</p>
         </section>
 
         <section class="card" aria-labelledby="heard-title">
@@ -114,6 +118,8 @@
             <button id="network-open"><i data-lucide="network"></i>Receiver health</button>
           </div>
         </section>
+
+        <footer class="credit">Made by Silviu YO6SAY · <a href="https://github.com/s1lviu/meridian-tdoa" target="_blank" rel="noopener noreferrer">source</a></footer>
       </aside>
     </main>
 

@@ -76,6 +76,7 @@ See [any-SDR nodes](docs/NODES.md).
 | Integrate with the backend | [API reference](docs/API.md) |
 | Use public KiwiSDRs fairly | [Live sources](docs/LIVE-SOURCES.md) |
 | Build and test | [Development guide](docs/DEVELOPMENT.md) |
+| Work on the code with an AI coding agent | [Agent guide](AGENTS.md) |
 
 ## License
 

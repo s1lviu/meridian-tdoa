@@ -1,6 +1,7 @@
 // Browser checks of the map against a real server process started here, on controlled data:
 // the bundled 2020 DCF77 recording (replay) and simulated own-node detections (live).
 // Usage: CHROMIUM_PATH=… node tests/browser.mjs path/to/meridian-tdoa
+// Screenshots and the check list go to evidence/ unless MERIDIAN_EVIDENCE_DIR names another directory.
 import { chromium } from "playwright";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
@@ -12,6 +13,8 @@ import { join, resolve } from "node:path";
 
 const repo = resolve(new URL("..", import.meta.url).pathname);
 const binary = resolve(process.argv[2] || "target/debug/meridian-tdoa");
+const evidence = resolve(process.env.MERIDIAN_EVIDENCE_DIR || join(repo, "evidence"));
+mkdirSync(evidence, { recursive: true });
 const work = mkdtempSync(join(tmpdir(), "meridian-browser-"));
 symlinkSync(join(repo, "web"), join(work, "web"));
 mkdirSync(join(work, "data/results"), { recursive: true });
@@ -49,6 +52,7 @@ try {
     try { if ((await fetch(base + "/api/ready")).ok) break; } catch {}
     await new Promise((r) => setTimeout(r, 100));
   }
+  assert.equal(await (await fetch(base + "/api/monitor")).json(), null, "no scheduler configured");
   const page = await browser.newPage({ viewport: { width: 1440, height: 950 } });
   const errors = [];
   page.on("pageerror", (e) => errors.push(e.message));
@@ -63,16 +67,52 @@ try {
   assert.equal(await page.locator("path.hypothesis-region").count(), 2);
   assert.equal(await page.locator("path.fix-region").count(), 0);
   ok("recording: two mirror hypotheses, no unique fix, three receivers listed");
-  await page.screenshot({ path: join(repo, "evidence/desktop.png") });
+  assert.ok(await page.locator("#next-window").isHidden(), "no countdown for an archived recording");
+  assert.match(await page.locator(".credit").innerText(), /^Made by Silviu YO6SAY/);
+  await page.screenshot({ path: join(evidence, "desktop.png") });
 
   await page.locator("#sync-loss").click();
   await page.waitForFunction(() => document.querySelector("#inspector")?.innerText.includes("Fewer than three"));
   assert.equal(await page.locator("path.hypothesis-region").count(), 0);
   ok("GNSS-loss replay: receiver excluded, no region drawn");
 
+  // Countdown to the next scheduled window. The test server runs no scheduler, so a stub
+  // serves its state; the page must count down, ask again once a window starts, and show a pause.
+  const plan = (seconds, notice = null) => ({
+    next_at: seconds == null ? null : new Date(Date.now() + seconds * 1000).toISOString(),
+    next_target_ids: ["ft8-40m", "msf-channel"],
+    notice,
+  });
+  let schedule = plan(65);
+  await page.route("**/api/monitor", (route) => route.fulfill({ json: schedule }));
+
   // Live: five GNSS-disciplined nodes report one target; the server locates and registers it.
   await page.locator("#mode-live").click();
   await page.waitForFunction(() => document.querySelector("#stats-body")?.innerText.includes("No live observation"));
+  await page.waitForFunction(() => /^Next window in 1:0\d · ft8-40m, msf-channel$/.test(document.querySelector("#next-window")?.textContent || ""));
+  const left = async () => {
+    const [m, s] = (await page.locator("#next-window b").innerText()).split(":").map(Number);
+    return m * 60 + s;
+  };
+  const first = await left();
+  await page.waitForFunction((before) => {
+    const [m, s] = (document.querySelector("#next-window b")?.textContent || "9:99").split(":").map(Number);
+    return m * 60 + s < before;
+  }, first);
+  ok("live: countdown to the next scheduled window");
+  schedule = plan(-1);
+  await page.evaluate(() => loadMonitor());
+  await page.waitForFunction(() => (document.querySelector("#next-window")?.textContent || "").startsWith("Window starting"));
+  schedule = plan(45);
+  await page.waitForFunction(() => /^Next window in 0:4\d/.test(document.querySelector("#next-window")?.textContent || ""), null, { timeout: 8000 });
+  ok("a started window makes the page ask for the following one");
+  schedule = plan(null, "Monitor paused: test notice");
+  await page.evaluate(() => loadMonitor());
+  await page.waitForFunction(() => document.querySelector("#next-window.paused")?.textContent === "Monitor paused: test notice");
+  schedule = plan(50);
+  await page.evaluate(() => loadMonitor());
+  await page.waitForFunction(() => /^Next window in 0:[45]\d/.test(document.querySelector("#next-window")?.textContent || ""));
+  ok("a paused scheduler shows its notice instead of a countdown");
   const target = [44.36, 26.2];
   async function sendBeacon(signal) {
     const now = Date.now() / 1000;
@@ -105,7 +145,8 @@ try {
   assert.match(await page.locator("#inspector").innerText(), /Located/);
   assert.equal(await page.locator("#inspector .rx-row").count(), 5);
   ok("observation inspector: located, five receivers, pair delays");
-  await page.screenshot({ path: join(repo, "evidence/live.png") });
+  await page.screenshot({ path: join(evidence, "live.png") });
+  await page.unroute("**/api/monitor");
 
   await sendBeacon("beacon-43");
   await page.waitForFunction(() => document.querySelector(".paint-delay")?.textContent.endsWith(" s (2)"));
@@ -122,13 +163,27 @@ try {
 
   const mobile = await browser.newPage({ viewport: { width: 390, height: 844 }, isMobile: true });
   await mobile.goto(base + "/", { waitUntil: "load" });
-  const overflow = await mobile.evaluate(() => document.scrollingElement.scrollWidth - window.innerWidth);
-  assert.ok(overflow <= 0, `horizontal overflow ${overflow}px`);
-  await mobile.screenshot({ path: join(repo, "evidence/mobile.png") });
-  ok("390 px layout without horizontal overflow");
+  await mobile.locator("#mode-badge").waitFor();
+  const layout = await mobile.evaluate(() => {
+    const right = (selector) => Math.round(document.querySelector(selector).getBoundingClientRect().right);
+    return {
+      width: innerWidth,
+      scroll: document.scrollingElement.scrollWidth,
+      panel: right(".panel"),
+      badge: right("#mode-badge"),
+      status: getComputedStyle(document.querySelector(".status-line")).display,
+    };
+  });
+  // Content wider than the screen makes mobile Chromium widen the layout viewport itself, so
+  // innerWidth alone hides the overflow: compare with the device width.
+  assert.equal(layout.width, 390, JSON.stringify(layout));
+  assert.ok(layout.scroll <= 390 && layout.panel <= 390 && layout.badge <= 390, JSON.stringify(layout));
+  assert.notEqual(layout.status, "none");
+  await mobile.screenshot({ path: join(evidence, "mobile.png") });
+  ok("390 px layout: nothing wider than the screen, status line visible");
   assert.deepEqual(errors, []);
   ok("no page errors");
-  writeFileSync(join(repo, "evidence/browser-tests.json"), JSON.stringify({ executed_at: new Date().toISOString(), checks }, null, 1));
+  writeFileSync(join(evidence, "browser-tests.json"), JSON.stringify({ executed_at: new Date().toISOString(), checks }, null, 1));
 } finally {
   await browser.close();
   server.kill("SIGTERM");

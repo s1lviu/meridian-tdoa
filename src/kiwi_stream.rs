@@ -10,6 +10,17 @@ use tokio_tungstenite::{
     tungstenite::{Message, protocol::WebSocketConfig},
 };
 
+/// The leading number of a refusal value, e.g. the minutes of `ip_limit=120%2c<ip>`.
+/// Only this metadata is logged; the IP address the receiver saw and redirect URLs are not.
+/// Keeping digits from the whole value used to turn `120%2c127.0.0.1` into `120%2127001`.
+fn refusal_detail(value: &str) -> String {
+    value
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .take(12)
+        .collect()
+}
+
 fn header(rate: u32) -> Vec<u8> {
     let mut out = b"RIFF\0\0\0\0WAVEfmt ".to_vec();
     out.extend(16u32.to_le_bytes());
@@ -127,15 +138,9 @@ async fn receive(endpoint: &str, center: f64, duration_s: u64, dir: &Path, id: &
                         | "monitor"
                 ) || (key == "badp" && value != "0")
                 {
-                    // Log only refusal metadata. Redirect URLs and server configuration are unnecessary.
-                    let detail: String = value
-                        .chars()
-                        .take(32)
-                        .filter(|c| c.is_ascii_digit() || *c == '%')
-                        .collect();
                     tokio::fs::write(
                         dir.join(format!("{id}.log")),
-                        format!("MERIDIAN-REFUSAL {key} {detail}\n"),
+                        format!("MERIDIAN-REFUSAL {key} {}\n", refusal_detail(value)),
                     )
                     .await?;
                     bail!("Receiver refused the recording ({key})");
@@ -202,6 +207,14 @@ async fn receive(endpoint: &str, center: f64, duration_s: u64, dir: &Path, id: &
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn refusal_detail_keeps_the_leading_number_only() {
+        assert_eq!(refusal_detail("120%2c127.0.0.1"), "120");
+        assert_eq!(refusal_detail("4"), "4");
+        assert_eq!(refusal_detail("http%3a%2f%2fexample.org"), "");
+        assert_eq!(refusal_detail(""), "");
+    }
+
     #[tokio::test]
     async fn native_public_handshake_preserves_gps_blocks_and_operator_refusals() {
         for refuse in [true, false] {
@@ -215,9 +228,11 @@ mod tests {
                     "SET auth t=kiwi p="
                 );
                 if refuse {
-                    ws.send(Message::binary(b"MSG badp=0 ip_limit=60".to_vec()))
-                        .await
-                        .unwrap();
+                    ws.send(Message::binary(
+                        b"MSG badp=0 ip_limit=120%2c127.0.0.1".to_vec(),
+                    ))
+                    .await
+                    .unwrap();
                     return;
                 }
                 ws.send(Message::binary(
@@ -258,10 +273,9 @@ mod tests {
             let wav = tmp.path().join("capture_rx.wav");
             if refuse {
                 assert!(result.is_err() && !wav.exists());
-                assert!(
-                    std::fs::read_to_string(tmp.path().join("rx.log"))
-                        .unwrap()
-                        .contains("ip_limit")
+                assert_eq!(
+                    std::fs::read_to_string(tmp.path().join("rx.log")).unwrap(),
+                    "MERIDIAN-REFUSAL ip_limit 120\n"
                 );
             } else {
                 result.unwrap();
