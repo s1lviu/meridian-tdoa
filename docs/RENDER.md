@@ -1,6 +1,6 @@
 # Deploy on Render
 
-Provider documentation checked on 27 November 2026. This project uses a **Docker Web Service**, containing Rust, Python and KiwiClient. Render provides an `onrender.com` URL and managed HTTPS; no VPS, SSH, custom domain or Caddy is needed for this deployment.
+Provider documentation checked on 27–28 November 2026. This project uses a **Docker Web Service**, containing Rust, Python and KiwiClient. Render provides an `onrender.com` URL and managed HTTPS; no VPS, SSH, custom domain or Caddy is needed for this deployment.
 
 [`render.yaml`](../render.yaml) explicitly selects **Free**, with no paid disk or database. JSON Schema validation checks the file's structure; Render also checks plan-specific restrictions when creating the Blueprint.
 
@@ -11,7 +11,7 @@ Provider documentation checked on 27 November 2026. This project uses a **Docker
 3. Wait for the build and open the URL Render assigns. `/api/ready` should return `status: ready`. Open `/?replay=1` for the bundled real recording.
 4. Find the generated `MERIDIAN_ADMIN_TOKEN` in the service's Environment settings. Enter it in the application only when requesting capture or reprocessing. Never commit it or place it in a URL.
 
-The configuration uses port 3000 on `0.0.0.0` and `/api/ready`. It omits `maxShutdownDelaySeconds` because Render Free rejects custom shutdown delays; Render's documented default is 30 seconds. A capture still running at shutdown can be interrupted. Subsequent deploys are manual (`autoDeployTrigger: off`) to avoid interrupting a capture whenever a commit is pushed.
+The configuration uses port 3000 on `0.0.0.0` and `/api/ready`. It omits `maxShutdownDelaySeconds` because Render Free rejects custom shutdown delays; Render's documented default is 30 seconds. A capture still running at shutdown can be interrupted. Each commit on the linked branch (`main`) deploys automatically once all of its GitHub checks pass (`autoDeployTrigger: checksPass`); a commit with a failed check, or with no checks, is not deployed. A commit that changes this Blueprint is also applied by Blueprint sync, which redeploys the modified service. Every deploy restarts the service and can interrupt a running capture.
 
 When using another repository, keep the Dockerfile and Blueprint at its root. Include `third_party/kiwiclient-4eb733e6.tar.gz`, the local frontend assets and bundled recordings/results. Exclude secrets and build directories.
 
@@ -49,4 +49,5 @@ Check that UID 10001 can write to the mounted path, readiness works, state survi
 
 - [Docker](https://render.com/docs/docker), [Web Services](https://render.com/docs/web-services), [Deploy button](https://render.com/docs/deploy-to-render)
 - [Blueprint specification](https://render.com/docs/blueprint-spec), [Free limits](https://render.com/docs/free)
+- [Automatic deploys](https://render.com/docs/deploys), [Blueprint sync](https://render.com/docs/infrastructure-as-code)
 - [Persistent disks](https://render.com/docs/disks), [pricing](https://render.com/pricing)
