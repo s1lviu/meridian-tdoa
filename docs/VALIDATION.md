@@ -11,7 +11,7 @@ Everything below was measured on real IQ recorded by public KiwiSDRs on **27 Nov
 | DCF77 77.5 kHz, four receivers | 32 windows | 32 | median **10.5 km**, P90 13.7 km, max 14.4 km | **32/32** |
 | FT8 40 m, 5–12 receivers requested | 595 payload/slot observations from 16 captures, 78 timed at ≥4 receivers with a sent locator | **2** | **194 km**, **274 km** | 2/2 |
 | IBP beacons, CW keying edges (retired method) | 769 slots | 0 | — | — |
-| Anonymous monitored channels | 9 windows on LF, MF and HF | **2** on 648 kHz | no independent transmitter identity | — |
+| Anonymous monitored channels | 10 windows on LF, MF and HF | **2** on 648 kHz | no independent transmitter identity | — |
 
 The scale follows physics. LF ground wave travels along the surface at a stable speed: kilometres. HF reaches distant receivers by one or more ionospheric hops whose extra path differs per receiver, and FT8 is only ~50 Hz wide: a timing error of about a millisecond, hundreds of kilometres per fix. A unique position also needs at least four receivers **around** the transmitter.
 
@@ -66,10 +66,11 @@ The correlated-channel profile examined every occupied sub-band. A correlated su
 | 19:53:43 | 5000 kHz | 4 | 9 | 0 | 0 |
 | 20:19:34 | 648 kHz | 4 | 29 | 5 | 1 |
 | 20:24:27 | 648 kHz | 4 | 32 | 4 | 0 |
+| 20:46:49 | 648 kHz | 3 | 40 | 7 | 0 |
 
-At 19:53, four receivers constrained a 1.84 kHz wide sub-band near 648.006 kHz to a region centred at 51.90° N, 2.55° E with maximum 95% radius 438 km. A second four-receiver result at 20:19, acquired using the native Rust Kiwi client, was centred at 52.06° N, 1.08° E with maximum radius 970 km. The archived receiver coordinates, pair delays and timing uncertainties permit independent re-solving of both observations. Broadcast frequency alone does not establish which co-channel transmitter was heard or its location error. At 20:24 four recordings on the same channel produced four correlations and zero unique positions.
+At 19:53, four receivers constrained a 1.84 kHz wide sub-band near 648.006 kHz to a region centred at 51.90° N, 2.55° E with maximum 95% radius 438 km. A second four-receiver result at 20:19, acquired using the native Rust Kiwi client, was centred at 52.06° N, 1.08° E with maximum radius 970 km. The archived receiver coordinates, pair delays and timing uncertainties permit independent re-solving of both observations. Broadcast frequency alone does not establish which co-channel transmitter was heard or its location error. At 20:24 four recordings on the same channel produced four correlations and zero unique positions. At 20:46 five receivers were requested, one refused the recording (`too_busy`) and one failed the pre-capture check (no free channel); the three recordings produced seven correlations and zero unique positions, as three receivers cannot bound a unique fix.
 
-An isolated copy of the live database served both MF observations and both FT8 tracks to the map. The FT8 inspector displayed the locator calculated from the estimated position. Hardware-timestamped simulated reports also exercised delivery into an already-open browser and the session latency indicator. The open-tab 648 kHz trial at 20:24 yielded no position to time.
+An isolated copy of the live database served both MF observations and both FT8 tracks to the map. The FT8 inspector displayed the locator calculated from the estimated position. Hardware-timestamped simulated reports also exercised delivery into an already-open browser and the session latency indicator. The open-tab 648 kHz trials at 20:24 and 20:46 yielded no position to time, so RF-to-map latency has no over-the-air sample yet.
 
 The 32 identified DCF77 fixes contained the PTB position in both the 68% ellipse and the 95% contour in 32/32 cases. The two FT8 fixes contained their respective **locator centres** in both regions. These samples give observed coverage on the recorded receiver geometries. The HF comparison has just two values, and the amateur locator is a grid square rather than an independently surveyed antenna.
 

@@ -582,6 +582,51 @@
       "correlated_subbands": 4,
       "unique": 0,
       "fixes": []
+    },
+    {
+      "capture_id": "live-ea51ce52-d8a0-452a-887e-9ce506add48b",
+      "capture_utc": "2026-11-27T20:46:49.660409+00:00",
+      "center_hz": 648000.0,
+      "iq_receivers": [
+        {
+          "receiver_id": "6ceceb67bea2",
+          "sha256": "047122eed5526f13cb2543be88808da13ee788d5190b85bcb613884b0e06d770",
+          "rx_position": {
+            "lat": 53.168558,
+            "lon": 6.598145
+          },
+          "rx_position_uncertainty_m": 1000.0
+        },
+        {
+          "receiver_id": "780473834f1d",
+          "sha256": "b8e2e32d46cdd31294fa2ff7c0593f01a82e29c0781ca077b9668b78e266796d",
+          "rx_position": {
+            "lat": 47.160165,
+            "lon": 7.580429
+          },
+          "rx_position_uncertainty_m": 1000.0
+        },
+        {
+          "receiver_id": "883f4aa8e0aa",
+          "sha256": "094e1add8cf9af0ef990b7db3288504e878471499860e3f2542dfd5b1f2bfc02",
+          "rx_position": {
+            "lat": 52.39,
+            "lon": 13.29
+          },
+          "rx_position_uncertainty_m": 1000.0
+        }
+      ],
+      "refused": [
+        {
+          "captured": false,
+          "error": "Receiver refused the recording (too_busy)",
+          "receiver": "b8804f25a14d"
+        }
+      ],
+      "cfar_subbands": 40,
+      "correlated_subbands": 7,
+      "unique": 0,
+      "fixes": []
     }
   ],
   "evening_dcf77_trial": {

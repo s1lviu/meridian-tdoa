@@ -43,6 +43,8 @@ CHROMIUM_PATH=… npm run test:browser                  # map against a real ser
 docker build -t meridian-ci . && sh tests/container.sh meridian-ci  # offline Linux release and persistent volume
 ```
 
+`tests/container.sh` runs the image non-root with a read-only root, 1 GiB memory and 128 pids, reprocesses the bundled DCF77 IQ and replaces the container on the same volume. It passed on linux/arm64 and linux/amd64 images on 27–28 November 2026 (UTC), and the Rust suite passed inside linux/amd64. To build linux/amd64 on Apple Silicon, use Rosetta binfmt in the Linux VM and remove `qemu-user`. BuildKit otherwise runs the Rust toolchain under QEMU, where `rustc -vV` crashes with SIGSEGV.
+
 What the Rust tests establish (no public receiver is contacted):
 
 | Area | Test |
