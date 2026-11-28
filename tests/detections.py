@@ -33,7 +33,8 @@ def distance(a, b):
 
 
 def main():
-    binary = sys.argv[1] if len(sys.argv) > 1 else shutil.which("meridian-tdoa")
+    # Popen resolves a relative executable against cwd=work, not against the caller's directory.
+    binary = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else shutil.which("meridian-tdoa")
     assert binary, "pass the meridian-tdoa binary path"
     work = tempfile.mkdtemp(prefix="meridian-detections-")
     os.symlink(os.path.join(REPO, "web"), os.path.join(work, "web"))
