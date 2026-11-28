@@ -19,6 +19,8 @@ if ! docker buildx inspect meridian >/dev/null 2>&1; then
 fi
 docker buildx build --builder meridian --load --tag "$image" "releases/$release"
 docker buildx prune --builder meridian --max-used-space 8gb --force >/dev/null
+# The builder container is idle between deploys; its cache survives the stop.
+docker buildx stop meridian
 
 cp "releases/$release/deploy/host/compose.yaml" compose.yaml
 [ -f image.env ] && cp image.env image.previous.env
