@@ -31,6 +31,8 @@ Only the invocation without a subcommand starts the server.
 
 ## Checks
 
+`scripts/check.sh` runs the steps of the CI `verify` job in order (`--quick`: rustfmt and the Rust tests). It reads a local `.env` for toolchain paths, skips the SoapySDR step when the library is missing and writes browser screenshots to a temporary directory. The individual commands:
+
 ```sh
 cargo fmt -- --check
 cargo test --locked                                   # unit, synthetic and real-IQ tests
@@ -39,7 +41,7 @@ cargo build --locked --features soapy --bin meridian-node
 python3 tests/soapy.py target/debug/meridian-node     # software device through the actual library
 python3 tests/transport.py                            # KiwiClient wrapper: one attempt, no redirects
 python3 tests/detections.py target/debug/meridian-tdoa   # node detections through a real server
-CHROMIUM_PATH=… npm run test:browser                  # map against a real server on controlled data
+CHROMIUM_PATH=… npm run test:browser                  # map against a real server; screenshots to evidence/ or $MERIDIAN_EVIDENCE_DIR
 docker build -t meridian-ci . && sh tests/container.sh meridian-ci  # offline Linux release and persistent volume
 ```
 

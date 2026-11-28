@@ -1,0 +1,5 @@
+# Same compiler and rustfmt as CI (`cargo +1.100.0`) and the Dockerfile (rust:1.100.0).
+[toolchain]
+channel = "1.100.0"
+components = ["rustfmt"]
+profile = "minimal"

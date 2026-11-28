@@ -2,7 +2,7 @@
 
 Use English for documentation, interface text, issues and pull requests. Keep changes focused and describe what changed and how it was verified.
 
-Run the relevant checks from the [development guide](docs/DEVELOPMENT.md#run-the-checks). Changes to capture, GNSS parsing, DSP or localization should include a meaningful regression check. UI changes should be checked in Chromium at desktop and mobile sizes. The CI workflow uses the bundled real recording and a fixed public directory snapshot; it does not open public SDR capture sessions.
+Run `scripts/check.sh` (the checks CI runs) or the relevant ones from the [development guide](docs/DEVELOPMENT.md#checks). Coding agents start with [AGENTS.md](AGENTS.md). Changes to capture, GNSS parsing, DSP or localization should include a meaningful regression check. UI changes should be checked in Chromium at desktop and mobile sizes. The CI workflow uses the bundled real recording and a fixed public directory snapshot; it does not open public SDR capture sessions.
 
 Preserve the measurement contract:
 
