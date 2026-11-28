@@ -10,6 +10,9 @@
     <link rel="stylesheet" href="/style.css" />
     <script defer src="/vendor/leaflet/leaflet.js"></script>
     <script defer src="/vendor/lucide.js"></script>
+    <script defer src="/results.js"></script>
+    <script defer src="/map-view.js"></script>
+    <script defer src="/inspection.js"></script>
     <script defer src="/app.js"></script>
   </head>
   <body>
@@ -24,22 +27,34 @@
 
     <main class="layout">
       <section class="map-card" aria-label="Transmitter map">
-        <div id="map"></div>
+        <div id="map" aria-label="Transmitter locations and possible regions"></div>
         <div class="map-overlay top">
-          <span id="mode-badge" class="badge live">LIVE · OWN RF ONLY</span>
-          <label class="switch"><input type="checkbox" id="show-observations" checked /> Single fixes</label>
-          <label class="switch"><input type="checkbox" id="show-receivers" checked /> Receivers</label>
+          <span id="mode-badge" class="badge live" aria-label="Live · own RF only">LIVE<span class="rf-origin"> · OWN RF ONLY</span></span>
+          <button id="ambiguous-map" class="map-button" hidden></button>
+          <button id="wide-group" class="map-button" hidden></button>
+          <button id="new-observations" class="map-button" hidden></button>
         </div>
-        <div class="map-overlay bottom legend">
-          <span><b class="key track"></b>Fused emitter (95%)</span>
-          <span><b class="key fix"></b>Single fix</span>
-          <span><b class="key hyp"></b>Ambiguous region</span>
-          <span><b class="key rx-used"></b>Receiver used</span>
-          <span><b class="key rx-heard"></b>Heard only</span>
+        <div class="map-overlay bottom">
+          <details id="map-key">
+            <summary><i data-lucide="layers"></i> Map key</summary>
+            <div class="legend">
+              <span><b class="key track"></b>Located emitter · 95% region on selection</span>
+              <span><b class="key hyp"></b>Possible transmitter region</span>
+              <span><b class="key fix"></b>Individual fix</span>
+              <span><b class="key rx-used"></b>Receiver used in fix</span>
+              <span><b class="key rx-heard"></b>Receiver heard only</span>
+              <span><b class="key rx-missing"></b>Receiver unconfirmed</span>
+              <label class="switch"><input type="checkbox" id="show-observations" /> Show individual fixes</label>
+              <label class="switch"><input type="checkbox" id="show-receivers" checked /> Show selected receivers</label>
+            </div>
+          </details>
         </div>
       </section>
 
       <aside class="panel" aria-label="Controls and results">
+        <section id="inspector" class="inspector" aria-label="Selected map result" hidden></section>
+        <h1 class="rail-title">Signal results</h1>
+        <label class="search"><i data-lucide="search"></i><input type="search" id="search" aria-label="Find a callsign or frequency" placeholder="Find callsign or frequency" /></label>
         <div class="filters">
           <label>Window
             <select id="window">
@@ -80,13 +95,27 @@
         <section class="card" aria-labelledby="located-title">
           <h2 id="located-title">Located emitters <small id="located-count">0</small></h2>
           <ol id="track-list" class="list"></ol>
+          <button id="track-more" class="more" hidden>Show more emitters</button>
           <p class="empty" id="track-empty">No transmitter located in this window yet. A position needs at least four receivers around the transmitter.</p>
         </section>
 
-        <section class="card" aria-labelledby="heard-title">
-          <h2 id="heard-title">Heard, position undetermined <small id="heard-count">0</small></h2>
-          <ol id="heard-list" class="list compact"></ol>
+        <section class="card" aria-labelledby="ambiguous-title">
+          <h2 id="ambiguous-title">Ambiguous observations <small id="ambiguous-count">0</small></h2>
+          <ol id="ambiguous-list" class="list compact"></ol>
+          <button id="ambiguous-more" class="more" hidden>Show more ambiguous observations</button>
         </section>
+
+        <section class="card" aria-labelledby="heard-title">
+          <h2 id="heard-title">Heard without a region <small id="heard-count">0</small></h2>
+          <ol id="heard-list" class="list compact"></ol>
+          <button id="heard-more" class="more" hidden>Show more heard observations</button>
+        </section>
+
+        <details class="card secondary">
+          <summary>Individual fixes <small id="single-count">0</small></summary>
+          <ol id="single-list" class="list compact"></ol>
+          <button id="single-more" class="more" hidden>Show more fixes</button>
+        </details>
 
         <section class="card" aria-labelledby="stats-title">
           <h2 id="stats-title">Measured performance <small>post hoc, hold-out references</small></h2>
@@ -110,8 +139,13 @@
       </aside>
     </main>
 
-    <aside id="inspector" class="inspector" aria-label="Selected emitter or observation" hidden></aside>
-
+    <dialog id="globe-dialog" aria-labelledby="globe-title">
+      <div class="modal-head"><h2 id="globe-title">Globe view</h2><form method="dialog"><button class="icon-button" aria-label="Close globe"><i data-lucide="x"></i></button></form></div>
+      <p id="globe-status" class="sub"></p>
+      <canvas id="globe-canvas" tabindex="0" aria-label="Globe. Drag or use the arrow keys to rotate."></canvas>
+      <div id="globe-locations" class="globe-locations"></div>
+      <button id="globe-flat">Show on flat map</button>
+    </dialog>
     <dialog id="modal">
       <form method="dialog" class="modal-head">
         <h2 id="modal-title"></h2>

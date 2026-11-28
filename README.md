@@ -31,6 +31,8 @@ The physics sets the scale: LF ground wave reaches kilometres; HF paths via the 
 
 The map receives changes as they happen (server-sent events). Raw IQ is kept only while useful (24 h when verified, deleted immediately otherwise); results and the emitter registry live in SQLite.
 
+Open a numbered area on the flat map to choose an emitter, or search the results by callsign or frequency. **Spans regions** lists emitters with broad uncertainty at the current zoom. Selecting an ambiguous observation shows all its possible regions. **Map key** explains the symbols and controls the optional background fixes and receiver markers. The selected result also offers a globe with a far-side indicator and a return to the flat map.
+
 ## Quick start
 
 Build with Rust 1.100 and a C compiler. Direct KiwiSDR capture uses the native Rust client. The optional KiwiClient transport requires Python 3 with NumPy.
