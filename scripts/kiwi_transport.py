@@ -9,6 +9,7 @@ import base64
 import http.client
 import os
 from pathlib import Path
+import re
 import runpy
 import socket
 import sys
@@ -66,7 +67,10 @@ def main():
                 rest = text.split(key, 1)[1].strip(': ').split()
                 if key == 'badp' and rest[:1] == ['0']:
                     continue
-                sys.stderr.write('MERIDIAN-REFUSAL %s %s\n' % (key, rest[0] if rest else ''))
+                # Only the leading number (e.g. ip_limit minutes), as the native transport logs it;
+                # the IP address the receiver saw and redirect URLs are not recorded.
+                detail = re.match(r'\d{0,12}', rest[0]).group() if rest else ''
+                sys.stderr.write('MERIDIAN-REFUSAL %s %s\n' % (key, detail))
                 sys.stderr.flush()
         return debug(msg, *a, **kw)
 
