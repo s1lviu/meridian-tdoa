@@ -15,10 +15,6 @@
   <body>
     <header class="topbar">
       <div class="brand"><i data-lucide="radar"></i><span>Meridian</span><small>TDoA</small></div>
-      <div class="modes" role="tablist" aria-label="Data source">
-        <button id="mode-live" role="tab" aria-selected="true">Live</button>
-        <button id="mode-replay" role="tab" aria-selected="false">Recording</button>
-      </div>
       <div class="status-line">
         <div class="status" id="status" role="status" aria-live="polite">Connecting…</div>
         <span id="next-window" class="next-window" role="timer" hidden></span>
@@ -99,15 +95,6 @@
               <thead><tr><th>Signal · band</th><th>Heard</th><th>Timed ≥2</th><th>Fixes</th><th>Fixes/h</th><th>Error P50 / P90</th><th>In 68% / 95%</th><th title="RF window start to the first fix available from the API, with sample count">API delay P50 / P90</th><th title="RF window start to display in this visible tab, with sample count">Map delay P50 / P90</th></tr></thead>
               <tbody id="stats-body"></tbody>
             </table>
-          </div>
-        </section>
-
-        <section class="card replay" id="replay-card" hidden aria-labelledby="replay-title">
-          <h2 id="replay-title">Archived recording</h2>
-          <p id="replay-text"></p>
-          <div class="buttons">
-            <button id="replay-open" class="primary"><i data-lucide="play"></i>Open recording</button>
-            <button id="sync-loss"><i data-lucide="satellite-dish"></i>Test GNSS loss</button>
           </div>
         </section>
 

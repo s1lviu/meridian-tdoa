@@ -19,7 +19,7 @@ JSON over the same origin as the map. Times are RFC 3339 UTC. Request bodies are
 | GET | `/api/sources`, `/api/beacons` | Public receiver directory and exclusion reasons |
 | POST | `/api/detections` | Arrival-time reports from own nodes (node bearer token) |
 | POST | `/api/capture` | Capture a configured target now (administrator token) |
-| POST | `/api/replay` | Open or reprocess a bundled recording |
+| POST | `/api/replay` | Reprocess a bundled recording. Tests only: images ship none unless `MERIDIAN_SEED_RECORDING=1` |
 | POST | `/api/review` | Attach eligibility evidence to a manual capture (administrator token) |
 | POST | `/api/directory/refresh` | Refresh the receiver directory (administrator token) |
 | GET | `/api/jobs/{id}` | Job status |

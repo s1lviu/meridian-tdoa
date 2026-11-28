@@ -1,5 +1,6 @@
 #!/bin/sh
 # Offline Linux image readiness and SQLite persistence through container replacement.
+# The archived DCF77 recording is seeded explicitly: production images start with live data only.
 set -eu
 image=${1:?Pass the local Meridian image tag}
 MERIDIAN_ADMIN_TOKEN=$(openssl rand -hex 32)
@@ -15,7 +16,7 @@ trap 'exit 1' HUP INT TERM
 start() {
     instance=$(docker run -d --read-only --cap-drop=ALL --security-opt=no-new-privileges \
         --memory=1g --pids-limit=128 --network none --tmpfs /tmp:size=128m,mode=1777 \
-        -v "$volume:/app/data" -e MERIDIAN_ADMIN_TOKEN \
+        -v "$volume:/app/data" -e MERIDIAN_ADMIN_TOKEN -e MERIDIAN_SEED_RECORDING=1 \
         -e MERIDIAN_DIRECTORY_OFFLINE=1 "$image")
     docker exec -i "$instance" python3 - <<'PYTHON'
 import json

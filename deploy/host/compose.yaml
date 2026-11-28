@@ -1,0 +1,44 @@
+# Meridian on a shared host behind its existing reverse proxy (deploy/host/setup.sh).
+# The service listens on 127.0.0.1 only. scripts/deploy-host.sh builds the image from one commit
+# and sets MERIDIAN_IMAGE. Each limit keeps Meridian from starving the other services on the host.
+name: meridian
+services:
+  app:
+    image: ${MERIDIAN_IMAGE:?set by deploy/host/activate.sh}
+    restart: unless-stopped
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    env_file: .secrets/runtime.env
+    environment:
+      PORT: "3000"
+      MERIDIAN_CONFIG: /app/config/production.json
+      MERIDIAN_CAPTURE_QUOTA_BYTES: ${MERIDIAN_CAPTURE_QUOTA_BYTES:-2147483648}
+      # glibc keeps a heap arena per thread by default; two arenas bound fragmentation.
+      MALLOC_ARENA_MAX: "2"
+    volumes:
+      # A fixed-size filesystem: Meridian's data can never fill the host disk. Without that
+      # filesystem mounted, the bind fails instead of writing to the root disk.
+      - type: bind
+        source: ${MERIDIAN_DATA_DIR:?set by deploy/host/setup.sh}
+        target: /app/data
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    ports:
+      - "127.0.0.1:${MERIDIAN_PORT:-8790}:3000"
+    mem_limit: ${MERIDIAN_MEMORY:-3g}
+    memswap_limit: ${MERIDIAN_MEMORY:-3g}
+    cpus: ${MERIDIAN_CPUS:-2}
+    # Half the default CPU weight, and the first candidate if the host runs out of memory.
+    cpu_shares: 512
+    oom_score_adj: 500
+    pids_limit: 256
+    ulimits:
+      nofile: {soft: 8192, hard: 8192}
+    stop_grace_period: 190s
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}

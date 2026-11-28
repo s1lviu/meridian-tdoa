@@ -5,7 +5,7 @@
 Requirements: Rust 1.100.0, a C compiler (ft8_lib and SQLite are compiled by `build.rs`/`rusqlite`), Python 3 (optional KiwiClient transport and integration tests), Node 22 with Playwright for browser tests.
 
 ```sh
-./scripts/start.sh                       # build and serve with config/app.json (replay only)
+./scripts/start.sh                       # build and serve with config/app.json (no capture)
 MERIDIAN_CONFIG=config/production.json cargo run --release --locked
 ```
 
@@ -25,6 +25,7 @@ meridian-tdoa stats [START_UTC END_UTC]            # complete interval statistic
 meridian-node capture SETTINGS.json OUT           # optional SoapySDR hardware input
 meridian-tdoa discover                           # refresh the receiver directory
 meridian-node watch DIR --server URL --node ID --token-file FILE [--once]
+scripts/deploy-host.sh SSH_HOST [GIT_REF]          # deploy a commit to a prepared host (HOSTING.md)
 ```
 
 Only the invocation without a subcommand starts the server.
