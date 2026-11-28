@@ -30,6 +30,39 @@ fn public_host(s: &str) -> bool {
 pub const URL: &str = "https://cdn.aethersdr.com/kiwi.json";
 pub const CACHE_SECONDS: u64 = 1800;
 
+/// Public relays of the KiwiSDR network. A receiver reached as `<n>.proxy2.kiwisdr.com` shares
+/// the relay's TCP endpoint with every other receiver behind it, and so shares its refusals.
+pub const KIWI_RELAYS: [&str; 3] = [
+    "proxy.kiwisdr.com",
+    "proxy2.kiwisdr.com",
+    "proxy3.kiwisdr.com",
+];
+
+/// The relay a host is reached through: `21897.proxy2.kiwisdr.com` → `proxy2.kiwisdr.com`.
+pub fn relay_of_host(host: &str) -> Option<&'static str> {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    KIWI_RELAYS.iter().copied().find(|relay| {
+        host.strip_suffix(relay)
+            .and_then(|label| label.strip_suffix('.'))
+            .is_some_and(|label| !label.is_empty())
+    })
+}
+
+/// The relay a receiver URL is reached through, if any.
+pub fn relay_of(url: &str) -> Option<&'static str> {
+    relay_of_host(reqwest::Url::parse(url).ok()?.host_str()?)
+}
+
+/// Fair-use ledger key of a relay. While it is blocked, no receiver behind it is contacted.
+pub fn relay_key(relay: &str) -> String {
+    format!("relay:{relay}")
+}
+
+/// Whether `url` is reached through a relay that `blocked` (ledger keys) contains.
+pub fn behind_blocked_relay(blocked: &std::collections::HashSet<String>, url: &str) -> bool {
+    relay_of(url).is_some_and(|relay| blocked.contains(&relay_key(relay)))
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Entry {
     pub id: String,
@@ -223,7 +256,12 @@ impl Directory {
         let mut candidates: Vec<_> = self
             .receivers
             .iter()
-            .filter(|r| !reserved.contains(&r.id) && r.covers(center) && unique.insert(&r.id))
+            .filter(|r| {
+                !reserved.contains(&r.id)
+                    && !behind_blocked_relay(reserved, &r.url)
+                    && r.covers(center)
+                    && unique.insert(&r.id)
+            })
             .collect();
         ensure!(
             candidates.len() >= 3,
@@ -444,6 +482,47 @@ mod tests {
             visited.insert(batch[0].id.clone());
         }
         assert_eq!(visited, eligible);
+    }
+    #[test]
+    fn receivers_behind_a_refusing_relay_are_never_selected() {
+        assert_eq!(
+            relay_of("http://21897.proxy2.kiwisdr.com:8073/"),
+            Some("proxy2.kiwisdr.com")
+        );
+        assert_eq!(
+            relay_of("http://22902.PROXY.kiwisdr.com:8073/"),
+            Some("proxy.kiwisdr.com")
+        );
+        for url in [
+            "http://proxy2.kiwisdr.com:8073/",
+            "http://xproxy.kiwisdr.com:8073/",
+            "http://82.139.82.247:8073/",
+            "http://sdr.example.org:8073/",
+        ] {
+            assert_eq!(relay_of(url), None, "{url}");
+        }
+        let d = parse(include_bytes!("../evidence/live/directory.json")).unwrap();
+        let center = 7_075_500.;
+        let behind = |batch: &[crate::model::LiveSource]| {
+            batch
+                .iter()
+                .filter(|s| relay_of(&s.base_url).is_some())
+                .count()
+        };
+        let open = std::collections::HashSet::new();
+        let reached: usize = (0..40)
+            .map(|round| behind(&d.network_spaced(center, round, 12, &open, 600.).unwrap()))
+            .sum();
+        assert!(
+            reached > 0,
+            "the archived directory reaches receivers via relays"
+        );
+        let blocked: std::collections::HashSet<_> =
+            KIWI_RELAYS.iter().map(|r| relay_key(r)).collect();
+        for round in 0..40 {
+            let batch = d.network_spaced(center, round, 12, &blocked, 600.).unwrap();
+            assert_eq!(behind(&batch), 0, "round {round}");
+        }
     }
     #[test]
     fn published_access_and_gnss_are_required_and_catalog_is_not_rf_evidence() {

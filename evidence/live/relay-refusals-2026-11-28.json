@@ -1,0 +1,88 @@
+{
+  "description": "Fair-use ledger of the production monitor on the self-hosted server in its first live minutes, read from GET /api/receivers/health and GET /api/sources. Each receiver is grouped by the host actually contacted (from the recorded failure, else the public directory). Counts use each receiver's last outcome, so a receiver refused twice counts once.",
+  "retrieved_utc": "2026-11-28T12:28:13Z",
+  "first_live_observation_utc": "2026-11-28T12:11:30Z",
+  "policy": {
+    "daily_minutes": 60.0,
+    "min_gap_s": 60
+  },
+  "by_path": {
+    "direct": {
+      "receivers_contacted": 83,
+      "receivers_with_iq": 45,
+      "last_outcome_tcp_connection_refused": 0,
+      "first_refusal_utc": null,
+      "last_refusal_utc": null,
+      "last_success_utc": "2026-11-28T12:27:04Z"
+    },
+    "proxy.kiwisdr.com": {
+      "receivers_contacted": 89,
+      "receivers_with_iq": 0,
+      "last_outcome_tcp_connection_refused": 89,
+      "first_refusal_utc": "2026-11-28T12:13:05Z",
+      "last_refusal_utc": "2026-11-28T12:27:04Z",
+      "last_success_utc": null
+    },
+    "proxy2.kiwisdr.com": {
+      "receivers_contacted": 2,
+      "receivers_with_iq": 1,
+      "last_outcome_tcp_connection_refused": 2,
+      "first_refusal_utc": "2026-11-28T12:22:26Z",
+      "last_refusal_utc": "2026-11-28T12:22:26Z",
+      "last_success_utc": "2026-11-28T12:11:42Z"
+    }
+  },
+  "dcf77_validation": {
+    "note": "The five receivers then configured as a fixed list for dcf77-validation. With fewer than three usable, every window failed before any receiver was contacted, with the job error below.",
+    "job_error": "Invalid target configuration",
+    "job_started_utc": "2026-11-28T12:27:56.001Z",
+    "job_failed_utc": "2026-11-28T12:27:56.014Z",
+    "receivers": [
+      {
+        "id": "f82e0c018380",
+        "host": "f1jeksdr1.ddns.net",
+        "relay": null,
+        "ok": 0,
+        "failed": 1,
+        "last_reason": "All receiver channels busy",
+        "seconds_24h": 0.0
+      },
+      {
+        "id": "00aafd2d3947",
+        "host": "22902.proxy.kiwisdr.com",
+        "relay": "proxy.kiwisdr.com",
+        "ok": 0,
+        "failed": 2,
+        "last_reason": "Preflight: error sending request for url (http://22902.proxy.kiwisdr.com:8073/status): client error (Connect): tcp connect error: Connection refused (os error 111)",
+        "seconds_24h": 0.0
+      },
+      {
+        "id": "147f0fdf7a94",
+        "host": "21918.proxy2.kiwisdr.com",
+        "relay": "proxy2.kiwisdr.com",
+        "ok": 0,
+        "failed": 2,
+        "last_reason": "Preflight: error sending request for url (http://21918.proxy2.kiwisdr.com:8073/status): client error (Connect): tcp connect error: Connection refused (os error 111)",
+        "seconds_24h": 0.0
+      },
+      {
+        "id": "f82e0c136d0e",
+        "host": "21897.proxy2.kiwisdr.com",
+        "relay": "proxy2.kiwisdr.com",
+        "ok": 1,
+        "failed": 1,
+        "last_reason": "Preflight: error sending request for url (http://21897.proxy2.kiwisdr.com:8073/status): client error (Connect): tcp connect error: Connection refused (os error 111)",
+        "seconds_24h": 30.0
+      },
+      {
+        "id": "0cb2b7d6cd86",
+        "host": "82.139.82.247",
+        "relay": null,
+        "ok": 0,
+        "failed": 1,
+        "last_reason": "Receiver per-IP time limit reached (120 min per 24 h)",
+        "seconds_24h": 0.0
+      }
+    ]
+  }
+}

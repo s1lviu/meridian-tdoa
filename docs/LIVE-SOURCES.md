@@ -10,13 +10,22 @@ Receiver metadata comes from the documented public mirror `https://cdn.aethersdr
 
 ## Fair use
 
-Volunteer receivers are shared with listeners. Meridian keeps one connection per receiver at a time, at least 60 s apart, at most 60 minutes per receiver per 24 h, backs off after failures and honours refusals: a receiver that reports its per-IP time limit (`ip_limit`), all channels busy, a password requirement or "down" is blocked for that period. The native Rust SND client records refusal codes directly. A configured HTTP CONNECT proxy selects pinned KiwiClient before the connection. Set `MERIDIAN_KIWI_TRANSPORT=kiwiclient` to select it explicitly. For this transport, `scripts/kiwi_transport.py` echoes just those lines so Meridian can act on them, and refuses any second connection attempt or redirect to another endpoint.
+Volunteer receivers are shared with listeners. Meridian keeps one connection per receiver at a time, at least 60 s apart, at most 60 minutes per receiver per 24 h, backs off after failures and honours refusals: a receiver that reports its per-IP time limit (`ip_limit`), all channels busy, a password requirement or "down" is blocked for that period. Connection time counts from the opened session to its end, including sessions that fail, time out or are refused.
+
+Receivers reached through a KiwiSDR relay (`<n>.proxy.kiwisdr.com`, `proxy2`, `proxy3`) share the relay's TCP endpoint. When the relay refuses the TCP connection to every receiver behind it in one capture, Meridian blocks the relay itself (`relay:<host>` in the ledger) with the same back-off as a receiver, and contacts no receiver behind it until that block ends. A receiver behind the relay that answers clears it. The native Rust SND client records refusal codes directly. A configured HTTP CONNECT proxy selects pinned KiwiClient before the connection. Set `MERIDIAN_KIWI_TRANSPORT=kiwiclient` to select it explicitly. For this transport, `scripts/kiwi_transport.py` echoes just those lines so Meridian can act on them, and refuses any second connection attempt or redirect to another endpoint.
 
 Observed on 27 November 2026, from one residential IP, after the earlier monitor had run for six hours without a budget:
 
 - the `*.proxy.kiwisdr.com` relay (and `kiwisdr.com` itself) refused every connection, removing 135 of the 268 then-eligible receivers;
 - several European receivers answered `ip_limit: 120` (minutes per 24 h);
 - of 85 receivers tried during the FT8 runs, 23 delivered IQ; the rest failed preflight (mostly GNSS reported unavailable) or delivered nothing.
+
+Observed on 28 November 2026 from the production server, in its first 17 minutes ([evidence](../evidence/live/relay-refusals-2026-11-28.json)):
+
+- `proxy.kiwisdr.com` refused the TCP connection to all 89 receivers tried through it, from 12:13:05 to 12:27:04 UTC. Blocking receiver by receiver, the monitor kept trying them one after another; the relay-wide block above replaces that;
+- `proxy2.kiwisdr.com` delivered one capture at 12:11:42 UTC and refused both of its receivers at 12:22:26;
+- 45 of 83 directly reachable receivers delivered IQ;
+- the DCF77 target still used a fixed list of five receivers. Three were behind the relays, one answered with its per-IP limit and one had no free channel, so every DCF77 window failed before contacting anyone. DCF77 now picks its receivers from the directory, starting near its configured ones.
 
 A real-time map of many transmitters cannot rest on borrowed channels alone. The receiver budget keeps Meridian a polite guest; [own nodes](NODES.md) are how coverage grows.
 

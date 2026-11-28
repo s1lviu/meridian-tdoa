@@ -73,22 +73,38 @@ fn append_iq(out: &mut Vec<u8>, frame: &[u8], previous: &mut Option<u32>) -> Res
     Ok(iq.len() / 4)
 }
 
+/// Record IQ and report how long the receiver's channel was open: from the accepted WebSocket
+/// session to its end, whether the capture succeeded, was refused or timed out. Fair-use
+/// accounting counts that time; a connection that never opened counts zero.
 pub async fn record(
     endpoint: &str,
     center: f64,
     duration_s: u64,
     dir: &Path,
     id: &str,
-) -> Result<()> {
-    timeout(
+) -> (Result<()>, f64) {
+    let opened = std::sync::OnceLock::new();
+    let result = timeout(
         Duration::from_secs(duration_s + 20),
-        receive(endpoint, center, duration_s, dir, id),
+        receive(endpoint, center, duration_s, dir, id, &opened),
     )
     .await
-    .context("Kiwi IQ capture timed out")?
+    .context("Kiwi IQ capture timed out")
+    .and_then(|r| r);
+    let connected_s = opened
+        .get()
+        .map_or(0., |t: &Instant| t.elapsed().as_secs_f64());
+    (result, connected_s)
 }
 
-async fn receive(endpoint: &str, center: f64, duration_s: u64, dir: &Path, id: &str) -> Result<()> {
+async fn receive(
+    endpoint: &str,
+    center: f64,
+    duration_s: u64,
+    dir: &Path,
+    id: &str,
+    opened: &std::sync::OnceLock<Instant>,
+) -> Result<()> {
     let mut url = reqwest::Url::parse(endpoint)?;
     let host = url.host_str().context("Missing receiver host")?;
     let port = url
@@ -109,6 +125,7 @@ async fn receive(endpoint: &str, center: f64, duration_s: u64, dir: &Path, id: &
         client_async_with_config(url.as_str(), tcp, Some(cfg)),
     )
     .await??;
+    let _ = opened.set(Instant::now());
     ws.send(Message::text("SET auth t=kiwi p=")).await?;
     let (mut rate, mut samples) = (0u32, 0usize);
     let mut out = Vec::new();
@@ -228,6 +245,8 @@ mod tests {
                     "SET auth t=kiwi p="
                 );
                 if refuse {
+                    // The channel is held for a while before the refusal: that time is used.
+                    tokio::time::sleep(Duration::from_millis(300)).await;
                     ws.send(Message::binary(
                         b"MSG badp=0 ip_limit=120%2c127.0.0.1".to_vec(),
                     ))
@@ -268,11 +287,15 @@ mod tests {
                 }
             });
             let tmp = tempfile::tempdir().unwrap();
-            let result = record(&format!("http://{addr}"), 648000., 4, tmp.path(), "rx").await;
+            let (result, connected_s) =
+                record(&format!("http://{addr}"), 648000., 4, tmp.path(), "rx").await;
             server.await.unwrap();
+            assert!(connected_s > 0., "an opened session uses the channel");
             let wav = tmp.path().join("capture_rx.wav");
             if refuse {
                 assert!(result.is_err() && !wav.exists());
+                assert!(connected_s >= 0.25, "{connected_s} s");
+                assert!(!crate::capture::connection_refused(&result.unwrap_err()));
                 assert_eq!(
                     std::fs::read_to_string(tmp.path().join("rx.log")).unwrap(),
                     "MERIDIAN-REFUSAL ip_limit 120\n"
@@ -287,5 +310,17 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn a_refused_tcp_connection_uses_no_channel_time_and_is_recognized() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let tmp = tempfile::tempdir().unwrap();
+        let (result, connected_s) =
+            record(&format!("http://{addr}"), 648000., 4, tmp.path(), "rx").await;
+        assert_eq!(connected_s, 0.);
+        assert!(crate::capture::connection_refused(&result.unwrap_err()));
     }
 }

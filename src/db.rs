@@ -564,11 +564,14 @@ impl Db {
         Ok(out)
     }
 
-    /// Record every receiver contacted by the capture in `dir` (fair-use accounting).
+    /// Record every receiver contacted by the capture in `dir` (fair-use accounting), and
+    /// every KiwiSDR relay in between: a relay that refused us blocks all receivers behind it.
     pub fn account(&self, dir: &Path, duration_s: u64) {
         let now = chrono::Utc::now().timestamp_millis();
-        for o in crate::capture::outcomes(dir, duration_s) {
-            if let Err(e) = self.record_receiver(&o, now) {
+        let receivers = crate::capture::outcomes(dir, duration_s);
+        let relays = crate::capture::relay_outcomes(&receivers);
+        for o in receivers.iter().chain(&relays) {
+            if let Err(e) = self.record_receiver(o, now) {
                 eprintln!("Receiver accounting failed for {}: {e}", o.id);
             }
         }
@@ -842,6 +845,64 @@ mod tests {
         assert_eq!(db.import_observations(vec![a]).unwrap(), 1);
         db.visit_live(0, i64::MAX, |_, published| assert!(published.is_none()))
             .unwrap();
+    }
+
+    #[test]
+    fn a_refusing_relay_blocks_every_receiver_behind_it_and_failed_sessions_use_the_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("m.sqlite")).unwrap();
+        crate::capture::tests::capture_records(dir.path());
+        db.account(dir.path(), 30);
+        let now = chrono::Utc::now().timestamp_millis();
+        let blocked = db
+            .unusable_receivers(now, &crate::model::ReceiverPolicy::default(), 30.)
+            .unwrap();
+        assert!(blocked.contains("relay:proxy2.kiwisdr.com"));
+        assert!(!blocked.contains("relay:proxy.kiwisdr.com"));
+        for (url, behind) in [
+            ("http://29999.proxy2.kiwisdr.com:8073/", true),
+            ("http://29999.proxy.kiwisdr.com:8073/", false),
+            ("http://198.51.100.20:8073/", false),
+        ] {
+            assert_eq!(
+                crate::directory::behind_blocked_relay(&blocked, url),
+                behind,
+                "{url}"
+            );
+        }
+        let used = |id: &str| {
+            db.receiver_health()
+                .unwrap()
+                .into_iter()
+                .find(|r| r["id"] == id)
+                .unwrap()["seconds_24h"]
+                .as_f64()
+                .unwrap()
+        };
+        assert_eq!(used("f"), 50.0, "the timed-out session counts");
+        assert_eq!(used("e"), 31.5);
+        assert_eq!(used("a"), 0.0);
+        // A later capture that reaches the relay again resets its back-off.
+        let again = tempfile::tempdir().unwrap();
+        std::fs::write(
+            again.path().join("source-checks.json"),
+            br#"[{"source":{"id":"a","base_url":"http://21001.proxy2.kiwisdr.com:8073/"},"observation":{}}]"#,
+        )
+        .unwrap();
+        std::fs::write(
+            again.path().join("capture-outcomes.json"),
+            br#"[{"receiver":"a","captured":true,"connected_s":30.2}]"#,
+        )
+        .unwrap();
+        db.account(again.path(), 30);
+        let relay = db
+            .receiver_health()
+            .unwrap()
+            .into_iter()
+            .find(|r| r["id"] == "relay:proxy2.kiwisdr.com")
+            .unwrap();
+        assert_eq!(relay["fails_in_row"], 0);
+        assert_eq!(relay["ok"], 1);
     }
 
     #[test]

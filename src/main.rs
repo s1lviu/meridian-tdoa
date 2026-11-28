@@ -943,6 +943,56 @@ fn process_ibp(db: &Db, path: &Path, capture_id: &str) -> anyhow::Result<(Vec<Em
     db.replace_dataset(capture_id, &emissions)?;
     Ok((emissions, summary))
 }
+/// Listen-then-measure evidence of the DCF77 profile: whether each receiver's IQ carried the
+/// PTB phase code (verification.json). A receiver that fails twice within six hours is then
+/// skipped on this channel instead of being asked again and again.
+fn record_phase_code_listens(db: &Db, manifest: &Path, m: &Manifest) {
+    let Some(v) = manifest
+        .parent()
+        .and_then(|dir| std::fs::read(dir.join("verification.json")).ok())
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+    else {
+        return;
+    };
+    let counts: Vec<(String, usize)> = v["receivers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|r| {
+            Some((
+                r["receiver_id"].as_str()?.to_owned(),
+                usize::from(r["accepted"] == true),
+            ))
+        })
+        .collect();
+    if let Err(e) = db.record_listen(m, &counts, &HashMap::new()) {
+        eprintln!("Recording DCF77 receptions failed for {}: {e}", m.id);
+    }
+}
+#[cfg(test)]
+#[test]
+fn a_receiver_missing_the_dcf77_phase_code_twice_is_skipped_on_the_channel() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(&dir.path().join("m.sqlite")).unwrap();
+    let mut m: Manifest =
+        serde_json::from_str(include_str!("../data/recordings/manifest.json")).unwrap();
+    m.mode = "live".into();
+    let now = meridian_tdoa::db::millis(&m.capture_utc).unwrap();
+    for n in 0..2 {
+        let capture = dir.path().join(format!("c{n}"));
+        std::fs::create_dir(&capture).unwrap();
+        std::fs::write(
+            capture.join("verification.json"),
+            br#"{"receivers":[{"receiver_id":"heard","accepted":true},{"receiver_id":"deaf","accepted":false}]}"#,
+        )
+        .unwrap();
+        m.id = format!("c{n}");
+        record_phase_code_listens(&db, &capture.join("manifest.json"), &m);
+    }
+    let r = db.reception(&channel_key(m.frequency_hz), now).unwrap();
+    assert!(r.quiet.contains("deaf"));
+    assert!(!r.quiet.contains("heard"));
+}
 /// Keep positively correlated IQ under the verified TTL, including anonymous signals.
 fn worth_keeping(rows: &[Emission]) -> bool {
     rows.iter().any(|e| {
@@ -986,6 +1036,11 @@ async fn finish(app: App, id: String, path: Result<PathBuf, anyhow::Error>, faul
                     value["id"] = json!(id);
                     record_job(&app, id, value);
                     return;
+                }
+                if m.mode == "live"
+                    && m.capture_profile.as_deref() == Some(meridian_tdoa::protocol::PROFILE)
+                {
+                    record_phase_code_listens(&app.db, p, &m);
                 }
                 if m.mode == "live" && !m.emission_verified {
                     if m.capture_profile.as_deref() == Some(meridian_tdoa::protocol::PROFILE) {

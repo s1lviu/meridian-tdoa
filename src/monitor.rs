@@ -82,6 +82,32 @@ pub(super) fn snapshot(app: &App) -> Value {
         "parallel_bands":settings.parallel_bands,"notice":status.notice,"last_job":batch.first(),"last_jobs":batch})
 }
 
+/// Where reconnaissance starts for a target, if not a worldwide rotation. The DCF77 profile is
+/// commissioned on receivers known to hear the time signal: the network grows from the mean
+/// position of its configured receivers. Receiver geography only; no transmitter position is
+/// used, and the solver never sees this point.
+fn seed_point(config: &Config, t: &Target) -> Option<meridian_tdoa::model::Point> {
+    if t.verification.as_deref() != Some(protocol::PROFILE) {
+        return None;
+    }
+    let (mut x, mut y, mut z, mut n) = (0., 0., 0., 0);
+    for s in config
+        .sources
+        .iter()
+        .filter(|s| t.source_ids.contains(&s.id))
+    {
+        let (lat, lon) = (s.position.lat.to_radians(), s.position.lon.to_radians());
+        x += lat.cos() * lon.cos();
+        y += lat.cos() * lon.sin();
+        z += lat.sin();
+        n += 1;
+    }
+    (n > 0).then(|| meridian_tdoa::model::Point {
+        lat: z.atan2(f64::hypot(x, y)).to_degrees(),
+        lon: y.atan2(x).to_degrees(),
+    })
+}
+
 fn plan_bands(
     config: &Config,
     directory: Option<&Directory>,
@@ -92,12 +118,15 @@ fn plan_bands(
     excluded: &HashSet<String>,
     per_target: &std::collections::HashMap<String, meridian_tdoa::db::Reception>,
 ) -> Vec<Result<(Config, Target)>> {
+    // With a directory network every profile picks its receivers there. A fixed list
+    // stopped DCF77 entirely once a few of its receivers were blocked or behind a relay.
     let dynamic = |t: &Target| {
         limit > 0
             && [
                 Some(ibp::PROFILE),
                 Some(meridian_tdoa::ft8_tdoa::PROFILE),
                 Some(meridian_tdoa::channel::PROFILE),
+                Some(protocol::PROFILE),
             ]
             .contains(&t.verification.as_deref())
     };
@@ -121,8 +150,25 @@ fn plan_bands(
         .map(|&i| {
             let mut t = targets[i].clone();
             let mut cfg = config.clone();
-            // Fixed receivers that are blocked or out of budget are skipped for this window.
-            t.source_ids.retain(|id| !excluded.contains(id));
+            // Fixed receivers that are blocked, behind a blocked relay or out of budget are
+            // skipped for this window.
+            let configured = t.source_ids.len();
+            t.source_ids.retain(|id| {
+                !excluded.contains(id)
+                    && !config.sources.iter().any(|s| {
+                        &s.id == id
+                            && meridian_tdoa::directory::behind_blocked_relay(excluded, &s.base_url)
+                    })
+            });
+            if !dynamic(&t) {
+                ensure!(
+                    t.source_ids.len() >= 3,
+                    "Only {} of {} configured receivers are usable now; the others are blocked, \
+                     behind a blocked relay, cooling down or out of their daily budget",
+                    t.source_ids.len(),
+                    configured
+                );
+            }
             if dynamic(&t) {
                 let round = rounds[i];
                 rounds[i] += 1;
@@ -146,7 +192,11 @@ fn plan_bands(
                             if t.verification.as_deref() == Some(meridian_tdoa::channel::PROFILE) {
                                 t.duration_s = t.duration_s.min(15);
                             }
-                            d.network_spaced(center, round / 2, limit, &avoid, spacing)?
+                            let anchor = match seed_point(config, &targets[i]) {
+                                Some(p) => d.anchor_near(center, p, &avoid)?,
+                                None => round / 2,
+                            };
+                            d.network_spaced(center, anchor, limit, &avoid, spacing)?
                         }
                     };
                 t.source_ids = cfg.sources.iter().map(|s| s.id.clone()).collect();
@@ -484,6 +534,70 @@ mod tests {
                 .source_ids
                 .iter()
                 .all(|id| !fixed[1].1.source_ids.contains(id))
+        );
+    }
+
+    #[test]
+    fn dcf77_is_planned_near_its_seed_receivers_when_they_are_blocked_or_behind_a_relay() {
+        use meridian_tdoa::directory::{KIWI_RELAYS, relay_key, relay_of};
+        let mut cfg: Config =
+            serde_json::from_str(include_str!("../config/production.json")).unwrap();
+        cfg.gps_offset_valid_until_utc = Some((Utc::now() + TimeDelta::days(1)).to_rfc3339());
+        let (settings, targets) = configured_targets(&cfg).unwrap().unwrap();
+        let directory =
+            meridian_tdoa::directory::load(Path::new("evidence/live/directory.json")).unwrap();
+        let dcf = targets
+            .iter()
+            .position(|t| t.id == "dcf77-validation")
+            .unwrap();
+        // Production on 28 November 2026: every configured receiver blocked, and the KiwiSDR
+        // relays refusing the server's address. The fixed list then had no usable receiver.
+        let mut excluded: HashSet<String> = targets[dcf].source_ids.iter().cloned().collect();
+        excluded.extend(KIWI_RELAYS.iter().map(|r| relay_key(r)));
+        let seed = seed_point(&cfg, &targets[dcf]).unwrap();
+        assert!((45.0..56.0).contains(&seed.lat) && (0.0..12.0).contains(&seed.lon));
+        let mut rounds = vec![0; targets.len()];
+        for _ in 0..4 {
+            let (plan_cfg, plan) = plan_bands(
+                &cfg,
+                Some(&directory),
+                &targets,
+                &[dcf],
+                &mut rounds,
+                settings.directory_receivers,
+                &excluded,
+                &Default::default(),
+            )
+            .pop()
+            .unwrap()
+            .unwrap();
+            assert_eq!(plan.source_ids.len(), settings.directory_receivers);
+            for s in &plan_cfg.sources {
+                assert!(!excluded.contains(&s.id), "{}", s.id);
+                assert!(relay_of(&s.base_url).is_none(), "{}", s.base_url);
+                let km = meridian_tdoa::geo::distance(seed, s.position);
+                assert!(km < 1500., "{} is {km:.0} km from the seed receivers", s.id);
+            }
+        }
+        // Without a directory network the configured receivers are used, and the error says why
+        // a window cannot start instead of calling the configuration invalid.
+        let err = plan_bands(
+            &cfg,
+            Some(&directory),
+            &targets,
+            &[dcf],
+            &mut rounds,
+            0,
+            &excluded,
+            &Default::default(),
+        )
+        .pop()
+        .unwrap()
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.starts_with("Only 0 of 5 configured receivers are usable now"),
+            "{err}"
         );
     }
 
